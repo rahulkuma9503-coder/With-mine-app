@@ -154,25 +154,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name or "there"
     username = update.effective_user.username
     
-    welcome_msg = f"Hi {user_name}! 👋\n\n"
+    # Build welcome message WITHOUT complex Markdown formatting
+    welcome_msg = f"Hi {user_name}! 👋\n"
     
     if username:
         welcome_msg += f"(@{username})\n\n"
+    else:
+        welcome_msg += "\n"
     
     welcome_msg += (
-        "🔐 *LinkShield Pro*\n\n"
+        "🔐 LinkShield Pro\n\n"
         "Create protected Telegram group links.\n\n"
         "📋 Commands:\n"
         "• /protect <link> - Create link\n"
         "• /revoke - Remove link\n"
         "• /help - Show help\n\n"
-        "Example: `/protect https://t.me/group`"
+        "Example: /protect https://t.me/group"
     )
     
-    await update.message.reply_text(
-        welcome_msg,
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await update.message.reply_text(welcome_msg)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
@@ -226,10 +226,7 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     
     if not context.args or not context.args[0].startswith("https://t.me/"):
-        await update.message.reply_text(
-            "Usage: `/protect https://t.me/group`",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("Usage: /protect https://t.me/group")
         return
 
     group_link = context.args[0]
@@ -260,14 +257,14 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # Simple message without markdown
     await update.message.reply_text(
         f"✅ Link created!\n\n"
-        f"ID: `{short_id}`\n\n"
+        f"ID: {short_id}\n\n"
         f"Protected link:\n"
-        f"`{protected_link}`\n\n"
-        f"To revoke: `/revoke {short_id}`",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+        f"{protected_link}\n\n"
+        f"To revoke: /revoke {short_id}",
+        reply_markup=reply_markup
     )
 
 async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -316,7 +313,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             short_id = link.get('short_id', link['_id'][:8])
             clicks = link.get('clicks', 0)
             
-            message += f"• `{short_id}` - {clicks} clicks\n"
+            message += f"• {short_id} - {clicks} clicks\n"
             keyboard.append([InlineKeyboardButton(
                 f"❌ Revoke {short_id}",
                 callback_data=f"revoke_{link['_id']}"
@@ -324,11 +321,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text(message, reply_markup=reply_markup)
         return
     
     # Revoke by ID
@@ -361,7 +354,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         }
     )
     
-    await update.message.reply_text(f"✅ Link `{link_id}` revoked")
+    await update.message.reply_text(f"✅ Link {link_id} revoked")
 
 async def handle_revoke_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: str):
     """Handle revoke button."""
@@ -504,16 +497,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     
     await update.message.reply_text(
-        "📋 *Commands*\n\n"
+        "📋 Commands\n\n"
         "/protect <link> - Create protected link\n"
         "/revoke - Revoke a link\n"
         "/help - This message\n\n"
-        "*How to:*\n"
+        "How to:\n"
         "1. Use /protect with group link\n"
         "2. Share the generated link\n"
         "3. Use /revoke to remove access\n\n"
-        "Example: `/protect https://t.me/group`",
-        parse_mode=ParseMode.MARKDOWN
+        "Example: /protect https://t.me/group"
     )
 
 async def store_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
