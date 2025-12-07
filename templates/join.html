@@ -1,230 +1,60 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Join Group</title>
-    
-    <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&display=swap" rel="stylesheet">
-    
-    <style>
-        :root {
-            --neon-green: #00ff41;
-            --neon-green-glow: rgba(0, 255, 65, 0.7);
-            --bg-color: #000000;
-            --text-color: #f0f0f0;
-        }
-
-        body {
-            font-family: 'Rajdhani', sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            overflow: hidden;
-            position: relative;
-        }
-
-        #matrix-bg {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-        }
-
-        .container {
-            text-align: center;
-            padding: 30px;
-            border-radius: 15px;
-            background: rgba(10, 20, 10, 0.8);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(0, 255, 65, 0.3);
-            box-shadow: 0 0 25px rgba(0, 255, 65, 0.2);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .scan-line, .scan-line-reverse {
-            position: absolute;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(
-                180deg,
-                rgba(0, 255, 65, 0) 0%,
-                rgba(0, 255, 65, 0.3) 48%,
-                rgba(0, 255, 65, 0.8) 50%,
-                rgba(0, 255, 65, 0.3) 52%,
-                rgba(0, 255, 65, 0) 100%
-            );
-            background-size: 100% 200%;
-            animation: scan 2.5s linear infinite;
-            pointer-events: none;
-            z-index: 1;
-            border-radius: 15px;
-        }
-
-        .scan-line-reverse {
-            animation-name: scan-reverse;
-        }
-
-        @keyframes scan {
-            0% { background-position: 0% -100%; }
-            100% { background-position: 0% 100%; }
-        }
-
-        @keyframes scan-reverse {
-            0% { background-position: 0% 100%; }
-            100% { background-position: 0% -100%; }
-        }
-
-        h1 {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 3em;
-            font-weight: 700;
-            color: var(--neon-green);
-            text-shadow: 0 0 5px var(--neon-green);
-            margin-top: 0;
-            position: relative;
-            z-index: 2;
-        }
-
-        p {
-            font-size: 1.5em;
-            font-weight: 400;
-            color: #cccccc;
-            position: relative;
-            z-index: 2;
-        }
-
-        .join-button {
-            font-family: 'Orbitron', sans-serif;
-            background-color: transparent;
-            color: var(--neon-green);
-            border: 2px solid var(--neon-green);
-            border-radius: 10px;
-            padding: 15px 40px;
-            font-size: 1.5em;
-            font-weight: 600;
-            cursor: pointer;
-            letter-spacing: 2px;
-            text-transform: uppercase;
-            transition: all 0.3s ease;
-            box-shadow: 0 0 5px var(--neon-green);
-            animation: pulse 2s infinite alternate;
-            margin-top: 20px;
-            position: relative;
-            z-index: 2;
-        }
-
-        .join-button:hover {
-            background-color: var(--neon-green);
-            color: var(--bg-color);
-            box-shadow: 0 0 10px var(--neon-green), 0 0 15px var(--neon-green-glow);
-            transform: scale(1.05);
-        }
-        
-        .join-button:disabled {
-            background-color: #333;
-            color: #777;
-            border-color: #777;
-            cursor: not-allowed;
-            box-shadow: none;
-            animation: none;
-            transform: scale(1);
-        }
-
-        @keyframes pulse {
-            0% { box-shadow: 0 0 5px var(--neon-green); }
-            100% { box-shadow: 0 0 8px var(--neon-green), 0 0 12px var(--neon-green-glow); }
-        }
-
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TEAM SECRET Preview</title>
+<style>
+body{margin:0;height:100vh;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center;font-family:sans-serif}
+iframe{width:100%;height:100%;border:0}
+</style>
 </head>
 <body>
-    <canvas id="matrix-bg"></canvas>
-
-    <div class="container">
-        <div class="scan-line"></div>
-        <div class="scan-line-reverse"></div>
-        
-        <h1>TEAM SECRET</h1>
-        <p>You are about to join an exclusive Telegram group.</p>
-        <button id="joinBtn" class="join-button">Join Now</button>
-    </div>
-
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script>
-        const canvas = document.getElementById('matrix-bg');
-        const ctx = canvas.getContext('2d');
-
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-
-        const matrix = "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789@#$%^&*()*&^%+-/~{[|`]}";
-        const matrixArray = matrix.split("");
-
-        const fontSize = 10;
-        const columns = canvas.width / fontSize;
-        const drops = [];
-        for(let x = 0; x < columns; x++) drops[x] = 1;
-
-        function draw() {
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.04)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            ctx.fillStyle = '#00ff41';
-            ctx.font = fontSize + 'px monospace';
-
-            for(let i = 0; i < drops.length; i++) {
-                const text = matrixArray[Math.floor(Math.random() * matrixArray.length)];
-                ctx.fillText(text, i * fontSize, drops[i] * fontSize);
-
-                if(drops[i] * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0;
-                drops[i]++;
-            }
-        }
-
-        setInterval(draw, 35);
-
-        // Telegram Web App
-        document.addEventListener('DOMContentLoaded', () => {
-            const joinBtn = document.getElementById('joinBtn');
-            const token = "{{ token }}"; 
-            const tg = window.Telegram.WebApp;
-            tg.ready();
-            tg.expand();
-            tg.enableClosingConfirmation();
-
-            joinBtn.addEventListener('click', async () => {
-                joinBtn.textContent = 'Loading...';
-                joinBtn.disabled = true;
-
-                try {
-                    const response = await fetch(`/getgrouplink/${token}`);
-                    const data = await response.json();
-
-                    if (data.url) {
-                        window.open(data.url, '_blank');
-                    } else {
-                        alert('Error: Could not retrieve the group link.');
-                    }
-                } catch (error) {
-                    console.error('Fetch error:', error);
-                    alert('An error occurred. Please try again.');
-                } finally {
-                    setTimeout(() => tg.close(), 500);
-                }
-            });
-        });
-    </script>
+<iframe srcdoc="<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='UTF-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1.0'>
+<title>TEAM SECRET</title>
+<link href='https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Cormorant+Garamond:wght@400;500;600;700&family=Orbitron:wght@400;700&family=Rajdhani:wght@400;600&display=swap' rel='stylesheet'>
+<style>
+:root{--bg:#000;--neon:#33ffff;--neon-soft:#77ffff;--glow:rgba(80,255,255,0.55);--glow-soft:rgba(120,255,255,0.35);--aura-opacity:0.55}
+body{margin:0;font-family:'Rajdhani',sans-serif;background:var(--bg);height:100vh;overflow:hidden;display:flex;align-items:center;justify-content:center;color:white;position:relative}
+#matrix-bg{position:absolute;inset:0;z-index:-10}
+.stars{position:absolute;inset:0;z-index:-9;pointer-events:none}
+.star{position:absolute;width:3px;height:3px;background:var(--neon-soft);border-radius:50%;opacity:0.7;animation:twinkle 3s infinite ease-in-out}
+@keyframes twinkle{0%{opacity:.2}50%{opacity:.9}100%{opacity:.2}}
+.neon-ring{position:absolute;width:380px;height:380px;border:3px solid rgba(80,255,255,0.25);border-radius:50%;filter:blur(1px);animation:spin 14s linear infinite;z-index:-8;box-shadow:0 0 35px var(--glow),0 0 50px var(--glow-soft)}
+@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+.neon-aura{position:absolute;inset:0;background:radial-gradient(circle,var(--neon) 0%,rgba(0,255,255,0.18) 40%,transparent 70%);z-index:-7;animation:pulse 5s infinite alternate ease-in-out;filter:blur(40px);opacity:var(--aura-opacity)}
+@keyframes pulse{0%{opacity:.45}100%{opacity:.75}}
+.container{background:rgba(255,255,255,0.03);padding:50px 60px;border-radius:28px;border:1.5px solid rgba(100,255,255,0.25);backdrop-filter:blur(15px);text-align:center;position:relative;animation:float 4s ease-in-out infinite alternate;box-shadow:0 0 30px rgba(80,255,255,0.15),0 0 50px rgba(80,255,255,0.12),inset 0 0 20px rgba(80,255,255,0.06);z-index:2}@keyframes float{0%{transform:translateY(0)}100%{transform:translateY(-10px)}}
+h1{font-family:'Cormorant Garamond', serif;font-weight:700;font-size:3em;color:var(--neon-soft);text-shadow:0 0 15px var(--glow),0 0 30px var(--glow-soft);margin:0 0 10px 0}
+p{font-size:1.25em;color:#e8fefe;margin-top:0;margin-bottom:18px;text-shadow:0 0 10px var(--glow-soft)}
+.join-button{padding:16px 55px;font-size:1.25em;border-radius:16px;border:1.5px solid var(--neon-soft);background:rgba(0,255,255,0.1);color:#001;cursor:pointer;transition:.28s;font-family:'Cormorant Garamond', serif;font-weight:600;box-shadow:0 0 20px rgba(120,255,255,0.25), inset 0 0 12px rgba(255,255,255,0.05);letter-spacing:2px}.join-button:hover{background:var(--neon-soft);color:#000;transform:scale(1.1);box-shadow:0 0 45px var(--glow),0 0 70px var(--glow-soft)}
+.small-note{font-size:0.9em;color:#dffefe;margin-top:12px;text-shadow:0 0 6px var(--glow-soft)}
+</style>
+</head>
+<body>
+<canvas id='matrix-bg'></canvas>
+<div class='stars'></div>
+<div class='neon-ring'></div>
+<div class='neon-aura'></div>
+<div class='container'>
+<h1>TEAM SECRET</h1>
+<p>Verifying your identity…</p>
+<button id='joinBtn' class='join-button'>Join Now</button>
+<div class='small-note'>Secure · Verified · Exclusive</div>
+</div>
+<script>
+const canvas=document.getElementById('matrix-bg');const ctx=canvas.getContext('2d');function resizeCanvas(){canvas.width=window.innerWidth;canvas.height=window.innerHeight;}window.addEventListener('resize',resizeCanvas);resizeCanvas();
+const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890@#$%^&*()*&^%+-/~{[|`]}';const arr=chars.split('');const fontSize=Math.max(13,Math.floor(window.innerWidth/85));let cols=Math.floor(canvas.width/fontSize);let drops=new Array(cols).fill(1);
+function draw(){ctx.fillStyle='rgba(0,0,0,0.08)';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.fillStyle='rgba(120,255,255,0.7)';ctx.font=fontSize+'px monospace';for(let i=0;i<drops.length;i++){const text=arr[Math.floor(Math.random()*arr.length)];ctx.fillText(text,i*fontSize,drops[i]*fontSize);if(drops[i]*fontSize>canvas.height && Math.random()>0.975)drops[i]=0;drops[i]++;} } setInterval(draw,35);
+const starContainer=document.querySelector('.stars');for(let i=0;i<70;i++){let star=document.createElement('div');star.classList.add('star');star.style.top=Math.random()*100+'%';star.style.left=Math.random()*100+'%';star.style.animationDelay=(Math.random()*2)+'s';starContainer.appendChild(star);}
+document.getElementById('joinBtn').addEventListener('click',()=>{alert('Telegram WebApp token integration works here!');});
+</script>
+</body>
+</html>">
+</iframe>
 </body>
 </html>
