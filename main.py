@@ -2,15 +2,18 @@ import os
 import logging
 import uuid
 import base64
+import asyncio
+import datetime
 from typing import Optional
 from pymongo import MongoClient
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.templating import Jinja2Templates
 
 # --- Telegram Imports ---
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, Message, ChatMember
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, Message, ChatMember, ChatInviteLink
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest, TelegramError
 
 # Enable logging
 logging.basicConfig(
@@ -28,38 +31,161 @@ client = MongoClient(MONGODB_URI)
 db_name = "protected_bot_db"
 db = client[db_name]
 links_collection = db["protected_links"]
-users_collection = db["users"]  # Store user data for broadcasting
-broadcast_collection = db["broadcast_history"]  # Store broadcast history
+users_collection = db["users"]
+channels_collection = db["channels"]
+broadcast_collection = db["broadcast_history"]
 
 def init_db():
-    """Verifies the MongoDB connection and creates indexes."""
+    """Verifies the MongoDB connection and creates/updates indexes."""
     try:
         client.admin.command('ismaster')
         logger.info("MongoDB connection successful.")
         
-        # Create indexes for better performance
-        users_collection.create_index("user_id", unique=True)
-        links_collection.create_index("created_at", expireAfterSeconds=86400)  # Auto expire after 24h
-        logger.info("Database indexes created.")
+        # Create or update indexes for better performance
+        try:
+            users_collection.create_index("user_id", unique=True)
+            logger.info("Users index created/updated.")
+        except Exception as e:
+            logger.warning(f"Could not create users index: {e}")
+        
+        try:
+            channels_collection.create_index("channel_id", unique=True)
+            logger.info("Channels index created/updated.")
+        except Exception as e:
+            logger.warning(f"Could not create channels index: {e}")
+        
+        # Handle TTL index for links collection - drop existing and create new
+        try:
+            # Get existing indexes
+            existing_indexes = list(links_collection.list_indexes())
+            
+            # Check if TTL index already exists
+            ttl_index_exists = False
+            for idx in existing_indexes:
+                if 'created_at' in idx.get('key', {}):
+                    if idx.get('expireAfterSeconds') != 86400:  # 24 hours in seconds
+                        # Drop the old index
+                        links_collection.drop_index(idx['name'])
+                        logger.info(f"Dropped old TTL index: {idx['name']}")
+                    else:
+                        ttl_index_exists = True
+                    break
+            
+            # Create new TTL index if needed
+            if not ttl_index_exists:
+                links_collection.create_index(
+                    "created_at", 
+                    expireAfterSeconds=86400,  # 24 hours
+                    name="created_at_ttl_24h"  # Use custom name
+                )
+                logger.info("Created TTL index for links (24h expiration).")
+            else:
+                logger.info("TTL index already exists with correct settings.")
+                
+        except Exception as e:
+            logger.error(f"Could not create TTL index: {e}")
+            # Try alternative approach
+            try:
+                # Drop all indexes except _id and recreate
+                for idx in links_collection.list_indexes():
+                    if idx['name'] != '_id_' and 'created_at' in idx.get('key', {}):
+                        links_collection.drop_index(idx['name'])
+                        logger.info(f"Dropped index: {idx['name']}")
+                
+                # Create new TTL index
+                links_collection.create_index(
+                    [("created_at", 1)], 
+                    expireAfterSeconds=86400,
+                    name="created_at_expire_24h"
+                )
+                logger.info("Created TTL index with custom name.")
+            except Exception as e2:
+                logger.error(f"Alternative TTL index creation also failed: {e2}")
+        
+        # Create other necessary indexes
+        try:
+            links_collection.create_index([("created_by", 1)])
+            logger.info("Created created_by index.")
+        except Exception as e:
+            logger.warning(f"Could not create created_by index: {e}")
+            
+        try:
+            broadcast_collection.create_index([("date", -1)])
+            logger.info("Created broadcast date index.")
+        except Exception as e:
+            logger.warning(f"Could not create broadcast index: {e}")
+            
     except Exception as e:
         logger.error(f"MongoDB connection failed: {e}")
         raise
 
+async def get_or_create_channel_invite(context: ContextTypes.DEFAULT_TYPE, channel_id: str) -> Optional[str]:
+    """Get or create an invite link for a channel using its ID."""
+    try:
+        # Try to convert channel_id to integer (for private channels)
+        try:
+            chat_id = int(channel_id)
+        except ValueError:
+            # If it's not a number, it might be a public channel username
+            if channel_id.startswith('@'):
+                chat_id = channel_id
+            else:
+                chat_id = f"@{channel_id}"
+        
+        # Try to create an invite link
+        invite_link: ChatInviteLink = await context.bot.create_chat_invite_link(
+            chat_id=chat_id,
+            creates_join_request=True,
+            name="Bot Access Link",
+            expire_date=datetime.datetime.now() + datetime.timedelta(hours=24)
+        )
+        return invite_link.invite_link
+    except BadRequest as e:
+        logger.error(f"Failed to create invite link for channel {channel_id}: {e}")
+        # If we can't create an invite link, try to get the existing invite link
+        try:
+            chat = await context.bot.get_chat(chat_id)
+            if chat.invite_link:
+                return chat.invite_link
+            elif chat.username:
+                return f"https://t.me/{chat.username}"
+        except Exception as e2:
+            logger.error(f"Failed to get chat info: {e2}")
+    except Exception as e:
+        logger.error(f"Unexpected error creating invite link: {e}")
+    
+    return None
+
 async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if user is member of the support channel."""
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "").replace("@", "")
+    """Check if user is member of the support channel using channel ID."""
+    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
     if not support_channel:
         return True  # Skip check if channel not configured
     
     try:
-        chat_member = await context.bot.get_chat_member(f"@{support_channel}", user_id)
+        # Try to convert to integer (private channel ID)
+        try:
+            chat_id = int(support_channel)
+        except ValueError:
+            # If it's not a number, check if it's a username
+            if support_channel.startswith('@'):
+                chat_id = support_channel
+            else:
+                chat_id = f"@{support_channel}"
+        
+        chat_member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return chat_member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
-    except Exception as e:
+    except BadRequest as e:
+        if "user not found" in str(e).lower() or "chat not found" in str(e).lower():
+            return False
         logger.error(f"Error checking channel membership: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error checking membership: {e}")
         return False
 
 async def require_channel_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check and enforce channel membership with a button."""
+    """Check and enforce channel membership with a button using channel ID."""
     user_id = update.effective_user.id
     
     # Store user in database for broadcasting
@@ -69,7 +195,8 @@ async def require_channel_membership(update: Update, context: ContextTypes.DEFAU
             "username": update.effective_user.username,
             "first_name": update.effective_user.first_name,
             "last_name": update.effective_user.last_name,
-            "last_active": update.message.date if update.message else None
+            "language_code": update.effective_user.language_code,
+            "last_active": update.message.date if update.message else datetime.datetime.now()
         }},
         upsert=True
     )
@@ -78,20 +205,42 @@ async def require_channel_membership(update: Update, context: ContextTypes.DEFAU
     if await check_channel_membership(user_id, context):
         return True
     
-    # User not in channel, show join button
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "").replace("@", "")
+    # User not in channel, show join button with invite link
+    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
     if support_channel:
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Our Channel", url=f"https://t.me/{support_channel}")],
-            [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Get or create invite link for the channel
+        invite_link = await get_or_create_channel_invite(context, support_channel)
         
-        await update.message.reply_text(
-            "👋 Welcome! Before using this bot, please join our official channel to stay updated.\n\n"
-            "After joining, click 'I've Joined' below.",
-            reply_markup=reply_markup
-        )
+        if invite_link:
+            keyboard = [
+                [InlineKeyboardButton("📢 Join Our Channel", url=invite_link)],
+                [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Store channel info in database
+            try:
+                channels_collection.update_one(
+                    {"channel_id": support_channel},
+                    {"$set": {
+                        "invite_link": invite_link,
+                        "last_updated": datetime.datetime.now()
+                    }},
+                    upsert=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to store channel info: {e}")
+            
+            await update.message.reply_text(
+                "👋 Welcome! Before using this bot, please join our official channel to stay updated.\n\n"
+                "After joining, click 'I've Joined' below.",
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text(
+                "Welcome to the bot!\n\n"
+                "Note: Could not generate invite link for the channel. Please contact admin."
+            )
     else:
         await update.message.reply_text("Welcome to the bot!")
     
@@ -110,9 +259,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         else:
             await query.answer("❌ You haven't joined the channel yet!", show_alert=True)
+    
+    # Handle broadcast confirmation separately
+    elif query.data in ["confirm_broadcast", "cancel_broadcast"]:
+        await handle_broadcast_confirmation(update, context)
 
 # --- Telegram Bot Logic ---
-# Create the PTB application object
 telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -125,13 +277,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Welcome message with channel button
         support_channel = os.environ.get("SUPPORT_CHANNEL", "")
         if support_channel:
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Our Channel", url=f"https://t.me/{support_channel.replace('@', '')}")]
-            ]
-            if os.environ.get("BROADCAST_CHANNEL"):
-                keyboard.append([InlineKeyboardButton("📢 Broadcast Channel", 
-                          url=f"https://t.me/{os.environ.get('BROADCAST_CHANNEL').replace('@', '')}")])
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            # Get existing invite link from database or create new one
+            channel_data = channels_collection.find_one({"channel_id": support_channel})
+            invite_link = None
+            
+            if channel_data and channel_data.get("invite_link"):
+                invite_link = channel_data["invite_link"]
+            else:
+                invite_link = await get_or_create_channel_invite(context, support_channel)
+            
+            keyboard = []
+            if invite_link:
+                keyboard.append([InlineKeyboardButton("📢 Join Our Channel", url=invite_link)])
+            
+            broadcast_channel = os.environ.get("BROADCAST_CHANNEL", "")
+            if broadcast_channel:
+                broadcast_invite = await get_or_create_channel_invite(context, broadcast_channel)
+                if broadcast_invite:
+                    keyboard.append([InlineKeyboardButton("📢 Broadcast Channel", url=broadcast_invite)])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
             
             await update.message.reply_text(
                 "👋 Welcome to Protected Link Bot!\n\n"
@@ -185,7 +350,7 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "_id": encoded_id, 
         "group_link": group_link,
         "created_by": update.effective_user.id,
-        "created_at": update.message.date
+        "created_at": datetime.datetime.now()
     })
 
     bot_username = (await context.bot.get_me()).username
@@ -217,6 +382,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     
     # Ask for confirmation
+    total_users = users_collection.count_documents({})
     keyboard = [
         [InlineKeyboardButton("✅ Yes, Broadcast", callback_data="confirm_broadcast")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")]
@@ -225,7 +391,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     await update.message.reply_text(
         f"⚠️ **Confirm Broadcast**\n\n"
-        f"This will be sent to all {users_collection.count_documents({})} users.\n"
+        f"This will be sent to {total_users} users.\n"
         f"Are you sure you want to continue?",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
@@ -267,7 +433,7 @@ async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DE
         # Save broadcast to history
         broadcast_collection.insert_one({
             "admin_id": query.from_user.id,
-            "date": query.message.date,
+            "date": datetime.datetime.now(),
             "message_type": message_to_broadcast.content_type,
             "total_users": total_users,
             "successful": successful,
@@ -296,15 +462,29 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     total_users = users_collection.count_documents({})
     total_links = links_collection.count_documents({})
-    active_links = links_collection.count_documents({"created_at": {"$gte": update.message.date - datetime.timedelta(hours=24)}})
+    active_links = links_collection.count_documents({
+        "created_at": {"$gte": datetime.datetime.now() - datetime.timedelta(hours=24)}
+    })
+    
+    # Get recent broadcasts
+    recent_broadcasts = list(broadcast_collection.find().sort("date", -1).limit(5))
+    broadcast_stats = ""
+    if recent_broadcasts:
+        for bc in recent_broadcasts:
+            date_str = bc["date"].strftime("%Y-%m-%d %H:%M")
+            success_rate = (bc["successful"] / bc["total_users"] * 100) if bc["total_users"] > 0 else 0
+            broadcast_stats += f"• {date_str}: {bc['successful']}/{bc['total_users']} ({success_rate:.1f}%)\n"
     
     await update.message.reply_text(
         f"📊 **Bot Statistics**\n\n"
-        f"• Total Users: {total_users}\n"
+        f"👥 **Users:**\n"
+        f"• Total Users: {total_users}\n\n"
+        f"🔗 **Links:**\n"
         f"• Total Links Created: {total_links}\n"
-        f"• Active Links (24h): {active_links}\n"
-        f"• Database: MongoDB\n"
-        f"• Uptime: Online",
+        f"• Active Links (24h): {active_links}\n\n"
+        f"📢 **Recent Broadcasts:**\n{broadcast_stats if broadcast_stats else '• None yet'}\n"
+        f"💾 **Database:** MongoDB\n"
+        f"🟢 **Status:** Online",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -318,12 +498,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     keyboard = []
     
     if support_channel:
-        keyboard.append([InlineKeyboardButton("📢 Join Our Channel", url=f"https://t.me/{support_channel.replace('@', '')}")])
+        # Get existing invite link
+        channel_data = channels_collection.find_one({"channel_id": support_channel})
+        if channel_data and channel_data.get("invite_link"):
+            keyboard.append([InlineKeyboardButton("📢 Join Our Channel", url=channel_data["invite_link"])])
     
-    if keyboard:
-        reply_markup = InlineKeyboardMarkup(keyboard)
-    else:
-        reply_markup = None
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
     help_text = (
         "🤖 **Protected Link Bot Help**\n\n"
@@ -369,8 +549,7 @@ telegram_bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, stor
 
 # Add callback query handler for buttons
 from telegram.ext import CallbackQueryHandler
-telegram_bot_app.add_handler(CallbackQueryHandler(button_callback, pattern="^check_join$"))
-telegram_bot_app.add_handler(CallbackQueryHandler(handle_broadcast_confirmation, pattern="^(confirm_broadcast|cancel_broadcast)$"))
+telegram_bot_app.add_handler(CallbackQueryHandler(button_callback))
 
 # --- FastAPI Web Server Setup ---
 app = FastAPI()
@@ -387,7 +566,7 @@ async def on_startup():
             logger.critical(f"{var} is not set. Exiting.")
             raise Exception(f"{var} environment variable not set!")
     
-    # Initialize database connection
+    # Initialize database connection with proper index handling
     init_db()
     
     # --- CORRECTED PTB LIFECYCLE MANAGEMENT ---
@@ -448,4 +627,4 @@ async def get_group_link(token: str):
 @app.get("/")
 async def root():
     """Root endpoint for health check."""
-    return {"status": "ok", "service": "Protected Link Bot"}
+    return {"status": "ok", "service": "Protected Link Bot", "timestamp": datetime.datetime.now().isoformat()}
