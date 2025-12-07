@@ -1,12 +1,12 @@
 import os
 import logging
-import sqlite3
 import uuid
 import base64
-from fastapi import FastAPI, Request, Response
+from pymongo import MongoClient
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.templating import Jinja2Templates
 
-# --- Corrected Telegram Imports ---
+# --- Telegram Imports ---
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -16,51 +16,56 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Database Setup ---
-DB_NAME = "links.db"
+# --- Database Setup (MongoDB) ---
+MONGODB_URI = os.environ.get("MONGODB_URI")
+if not MONGODB_URI:
+    raise Exception("MONGODB_URI environment variable not set!")
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
+# Initialize MongoDB client and select database/collection
+client = MongoClient(MONGODB_URI)
+# The database name is usually part of the connection string, or you can specify it here
+db_name = MONGODB_URI.split('/')[-1].split('?')[0]
+db = client[db_name]
+links_collection = db["protected_links"]
 
 def init_db():
-    # Create table if it doesn't exist
-    with get_db_connection() as conn:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS protected_links (
-                id TEXT PRIMARY KEY,
-                group_link TEXT NOT NULL
-            )"""
-        )
-        conn.commit()
+    """In MongoDB, collections are created lazily on first insert.
+    This function can be used to verify the connection."""
+    try:
+        # The ismaster command is cheap and does not require auth.
+        client.admin.command('ismaster')
+        logger.info("MongoDB connection successful.")
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {e}")
+        raise
 
 # --- Telegram Bot Logic ---
-# This is a standard PTB application setup
 telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command, both general and with a payload."""
-    if context.args:
-        encoded_id = context.args[0]
-        with get_db_connection() as conn:
-            link_data = conn.execute("SELECT group_link FROM protected_links WHERE id = ?", (encoded_id,)).fetchone()
-
-        if link_data:
-            group_link = link_data["group_link"]
-            # Use RENDER_EXTERNAL_URL for the web app URL
-            web_app_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/join?token={encoded_id}"
-            
-            keyboard = [[InlineKeyboardButton("Join Group", web_app=WebAppInfo(url=web_app_url))]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text("Click the button below to join the group.", reply_markup=reply_markup)
-        else:
-            await update.message.reply_text("Sorry, this link is invalid or has expired.")
-    else:
+    """Handles the /start command."""
+    if not context.args:
         await update.message.reply_text(
-            "Welcome! Use /protect <group_link> to create a protected link."
+            "Welcome! I can create protected links for your Telegram groups.\n\n"
+            "Use /protect <group_link> to create one."
         )
+        return
+
+    encoded_id = context.args[0]
+    
+    # Find the link in MongoDB
+    link_data = links_collection.find_one({"_id": encoded_id})
+
+    if link_data:
+        group_link = link_data["group_link"]
+        web_app_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/join?token={encoded_id}"
+        
+        keyboard = [[InlineKeyboardButton("Join Group", web_app=WebAppInfo(url=web_app_url))]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text("Click the button below to join the group.", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("Sorry, this link is invalid or has expired.")
 
 async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generates a protected link for a given group link."""
@@ -72,9 +77,8 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     unique_id = str(uuid.uuid4())
     encoded_id = base64.urlsafe_b64encode(unique_id.encode()).decode().rstrip("=")
 
-    with get_db_connection() as conn:
-        conn.execute("INSERT INTO protected_links (id, group_link) VALUES (?, ?)", (encoded_id, group_link))
-        conn.commit()
+    # Insert the new link into MongoDB
+    links_collection.insert_one({"_id": encoded_id, "group_link": group_link})
 
     bot_username = (await context.bot.get_me()).username
     protected_link = f"https://t.me/{bot_username}?start={encoded_id}"
@@ -92,6 +96,10 @@ app = FastAPI()
 @app.on_event("startup")
 async def on_startup():
     """Initializes the database and sets the Telegram webhook."""
+    if not os.environ.get("TELEGRAM_TOKEN") or not os.environ.get("RENDER_EXTERNAL_URL"):
+        logger.critical("TELEGRAM_TOKEN or RENDER_EXTERNAL_URL is not set. Exiting.")
+        return
+
     init_db()
     webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/{os.environ.get('TELEGRAM_TOKEN')}"
     await telegram_bot_app.bot.set_webhook(url=webhook_url)
@@ -101,7 +109,7 @@ async def on_startup():
 async def telegram_webhook(request: Request, token: str):
     """Receives updates from Telegram and passes them to the PTB application."""
     if token != os.environ.get("TELEGRAM_TOKEN"):
-        return Response(status_code=403)
+        raise HTTPException(status_code=403, detail="Invalid token")
     
     update_data = await request.json()
     update = Update.de_json(update_data, telegram_bot_app.bot)
@@ -118,10 +126,10 @@ async def join_page(request: Request, token: str):
 @app.get("/getgrouplink/{token}")
 async def get_group_link(token: str):
     """API endpoint for the Web App to fetch the real group link."""
-    with get_db_connection() as conn:
-        link_data = conn.execute("SELECT group_link FROM protected_links WHERE id = ?", (token,)).fetchone()
+    link_data = links_collection.find_one({"_id": token})
     
     if link_data:
         return {"url": link_data["group_link"]}
     else:
-        return {"error": "Link not found"}, 404
+        raise HTTPException(status_code=404, detail="Link not found")
+        
