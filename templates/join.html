@@ -81,19 +81,50 @@ p{
   border-radius:16px;
   border:1.5px solid var(--neon-soft);
   background:rgba(0,255,255,0.1);
-  color:#001;
+  color:#e8fefe;
   cursor:pointer;
   transition:.28s;
   font-family:'Cormorant Garamond', serif;
   font-weight:600;
   box-shadow:0 0 20px rgba(120,255,255,0.25), inset 0 0 12px rgba(255,255,255,0.05);
   letter-spacing:2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0 auto;
 }
-.join-button:hover{
+.join-button:hover:not(:disabled){
   background:var(--neon-soft);
   color:#000;
   transform:scale(1.1);
   box-shadow:0 0 45px var(--glow),0 0 70px var(--glow-soft);
+}
+.join-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+/* Loading Spinner */
+.loading-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: var(--neon);
+  animation: spin 1s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+.error-msg {
+  animation: shake 0.5s ease-in-out;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
 }
 
 .small-note{font-size:0.9em;color:#dffefe;margin-top:12px;text-shadow:0 0 6px var(--glow-soft)}
@@ -108,8 +139,10 @@ p{
 
 <div class='container'>
   <h1>TEAM SECRET</h1>
-  <p>Verifying your identity…</p>
-  <button id="joinBtn" class='join-button'>Join Now</button>
+  <p id="statusMessage">Verifying your identity…</p>
+  <button id="joinBtn" class='join-button'>
+    <span id="btnText">Join Now</span>
+  </button>
   <div class='small-note'>Secure · Verified · Exclusive</div>
 </div>
 
@@ -155,31 +188,120 @@ for(let i=0;i<70;i++){
 /* Telegram WebApp Integration */
 document.addEventListener('DOMContentLoaded', () => {
   const joinBtn = document.getElementById('joinBtn');
-  const token = "{{ token }}"; // Replace with real token from server
-
+  const btnText = document.getElementById('btnText');
+  const statusMessage = document.getElementById('statusMessage');
+  
+  // Extract token from URL query parameter
+  const urlParams = new URLSearchParams(window.location.search);
+  const token = urlParams.get('token');
+  
   const tg = window.Telegram.WebApp;
-  tg.ready();
-  tg.expand();
-  tg.enableClosingConfirmation();
+  
+  // Check if running in Telegram WebApp
+  const isTelegram = typeof tg !== 'undefined' && tg.initData;
+  
+  if (!token) {
+    btnText.textContent = 'Invalid Access';
+    joinBtn.disabled = true;
+    joinBtn.style.background = 'rgba(255, 80, 80, 0.1)';
+    joinBtn.style.borderColor = '#ff5555';
+    statusMessage.textContent = 'Access denied. No valid token.';
+    statusMessage.style.color = '#ff5555';
+    return;
+  }
+
+  // Initialize Telegram WebApp if available
+  if (isTelegram) {
+    tg.ready();
+    tg.expand();
+    tg.enableClosingConfirmation();
+    
+    // Optional: Show user info
+    const user = tg.initDataUnsafe.user;
+    if (user) {
+      statusMessage.innerHTML = `Verifying <span style="color: var(--neon-soft);">${user.first_name}</span>...`;
+    }
+  }
 
   joinBtn.addEventListener('click', async () => {
-    joinBtn.textContent = 'Loading...';
+    // Add loading spinner
+    const spinner = document.createElement('div');
+    spinner.className = 'loading-spinner';
+    joinBtn.prepend(spinner);
+    btnText.textContent = 'Processing...';
     joinBtn.disabled = true;
 
     try {
-      const response = await fetch(`/getgrouplink/${token}`);
+      // Verify token with server
+      const verifyResponse = await fetch(`/verify-token?token=${encodeURIComponent(token)}`);
+      if (!verifyResponse.ok) throw new Error('Token verification failed');
+      const verifyData = await verifyResponse.json();
+      
+      if (!verifyData.valid) {
+        throw new Error('Token expired or invalid');
+      }
+      
+      // Get group link
+      const response = await fetch(`/getgrouplink?token=${encodeURIComponent(token)}`);
+      if (!response.ok) throw new Error('Failed to get group link');
       const data = await response.json();
 
       if (data.url) {
-        window.open(data.url, '_blank');
+        // Remove spinner and update button
+        spinner.remove();
+        btnText.textContent = '✓ Success';
+        joinBtn.style.background = 'rgba(80, 255, 80, 0.1)';
+        joinBtn.style.borderColor = '#55ff55';
+        
+        statusMessage.textContent = 'Welcome to TEAM SECRET';
+        statusMessage.style.color = '#55ff55';
+        
+        // Open link
+        if (isTelegram && tg.openLink) {
+          tg.openLink(data.url);
+        } else {
+          window.open(data.url, '_blank');
+        }
+        
+        // Close WebApp after delay if in Telegram
+        if (isTelegram) {
+          setTimeout(() => {
+            tg.close();
+          }, 1500);
+        }
+        
       } else {
-        alert('Error: Could not retrieve the group link.');
+        throw new Error('No group link available');
       }
     } catch (error) {
-      console.error('Fetch error:', error);
-      alert('An error occurred. Please try again.');
-    } finally {
-      setTimeout(()=>tg.close(),500);
+      console.error('Error:', error);
+      
+      // Remove spinner and show error
+      spinner.remove();
+      btnText.textContent = 'Failed - Try Again';
+      joinBtn.disabled = false;
+      joinBtn.style.background = 'rgba(255, 80, 80, 0.1)';
+      joinBtn.style.borderColor = '#ff5555';
+      
+      statusMessage.textContent = 'Connection error. Please try again.';
+      statusMessage.style.color = '#ff5555';
+      
+      // Shake animation for error
+      statusMessage.style.animation = 'shake 0.5s ease-in-out';
+      setTimeout(() => {
+        statusMessage.style.animation = '';
+      }, 500);
+      
+      // Reset button after 3 seconds
+      setTimeout(() => {
+        if (joinBtn.disabled === false) {
+          btnText.textContent = 'Join Now';
+          joinBtn.style.background = 'rgba(0,255,255,0.1)';
+          joinBtn.style.borderColor = 'var(--neon-soft)';
+          statusMessage.textContent = 'Ready to join TEAM SECRET';
+          statusMessage.style.color = '#e8fefe';
+        }
+      }, 3000);
     }
   });
 });
