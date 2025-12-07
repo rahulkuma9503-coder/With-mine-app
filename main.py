@@ -105,16 +105,11 @@ async def require_channel_membership(update: Update, context: ContextTypes.DEFAU
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Get user's first name for personalized message
-        user_name = update.effective_user.first_name or "there"
         await update.message.reply_text(
-            f"Hi {user_name}! 👋\n\n"
-            "Join our channel first to use this bot.\n"
+            "🔐 Join our channel first to use this bot.\n"
             "Then click 'Check' below.",
             reply_markup=reply_markup
         )
-    else:
-        return True
     
     return False
 
@@ -125,11 +120,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     if query.data == "check_join":
         if await check_channel_membership(query.from_user.id, context):
-            user_name = query.from_user.first_name or "User"
             await query.message.edit_text(
-                f"Welcome {user_name}! 👋\n"
-                "✅ Verified!\n\n"
-                "You can now use the bot.\n"
+                "✅ Verified!\n"
+                "You can now use the bot.\n\n"
                 "Use /help for commands."
             )
         else:
@@ -150,7 +143,7 @@ telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN"))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /start command."""
-    # Check channel membership
+    # Check channel membership first
     if not await require_channel_membership(update, context):
         return
     
@@ -165,11 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             keyboard = [[InlineKeyboardButton("🔗 Join Group", web_app=WebAppInfo(url=web_app_url))]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Get user's first name for personalized message
-            user_name = update.effective_user.first_name or "User"
-            
             await update.message.reply_text(
-                f"Hi {user_name}! 👋\n\n"
                 "🔐 This is a Protected Link\n\n"
                 "Click the button below to proceed.",
                 reply_markup=reply_markup
@@ -178,11 +167,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("❌ Link expired or revoked")
         return
     
-    # Simple welcome message with username
+    # No args - show welcome message
     user_name = update.effective_user.first_name or "there"
     username = update.effective_user.username
     
-    # Create personalized welcome message
     welcome_msg = f"Hi {user_name}! 👋\n\n"
     
     if username:
@@ -227,8 +215,6 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "short_id": short_id,
         "group_link": group_link,
         "created_by": update.effective_user.id,
-        "created_by_name": update.effective_user.first_name,
-        "created_by_username": update.effective_user.username,
         "created_at": datetime.datetime.now(),
         "active": True,
         "clicks": 0
@@ -236,9 +222,6 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     bot_username = (await context.bot.get_me()).username
     protected_link = f"https://t.me/{bot_username}?start={encoded_id}"
-    
-    # Get user's name for personalized message
-    user_name = update.effective_user.first_name or "User"
     
     # Simple buttons
     keyboard = [
@@ -250,7 +233,6 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"Hi {user_name}! 👋\n\n"
         f"✅ Link created!\n\n"
         f"ID: `{short_id}`\n\n"
         f"Protected link:\n"
@@ -279,10 +261,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("📭 No active links")
             return
         
-        # Get user's name
-        user_name = update.effective_user.first_name or "User"
-        
-        message = f"Hi {user_name}! 👋\n\n🔐 Your links:\n\n"
+        message = "🔐 Your links:\n\n"
         keyboard = []
         
         for link in active_links:
@@ -334,8 +313,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         }
     )
     
-    user_name = update.effective_user.first_name or "User"
-    await update.message.reply_text(f"Hi {user_name}! 👋\n\n✅ Link `{link_id}` revoked")
+    await update.message.reply_text(f"✅ Link `{link_id}` revoked")
 
 async def handle_revoke_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: str):
     """Handle revoke button."""
@@ -363,8 +341,7 @@ async def handle_revoke_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
         }
     )
     
-    user_name = query.from_user.first_name or "User"
-    await query.message.edit_text(f"Hi {user_name}! 👋\n\n✅ Link revoked")
+    await query.message.edit_text("✅ Link revoked")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin broadcast."""
@@ -455,10 +432,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not await require_channel_membership(update, context):
         return
     
-    user_name = update.effective_user.first_name or "there"
-    
     await update.message.reply_text(
-        f"Hi {user_name}! 👋\n\n"
         "📋 *Commands*\n\n"
         "/protect <link> - Create protected link\n"
         "/revoke - Revoke a link\n"
@@ -495,6 +469,7 @@ telegram_bot_app.add_handler(CallbackQueryHandler(button_callback))
 
 # --- FastAPI Setup ---
 app = FastAPI()
+templates = Jinja2Templates(directory="templates")
 
 @app.on_event("startup")
 async def on_startup():
@@ -542,18 +517,8 @@ async def telegram_webhook(request: Request, token: str):
 
 @app.get("/join")
 async def join_page(request: Request, token: str):
-    """Web app page with updated message."""
-    templates = Jinja2Templates(directory="templates")
-    
-    # Get link data to show creator info
-    link_data = links_collection.find_one({"_id": token})
-    context = {
-        "request": request, 
-        "token": token,
-        "link_data": link_data
-    }
-    
-    return templates.TemplateResponse("join.html", context)
+    """Web app page."""
+    return templates.TemplateResponse("join.html", {"request": request, "token": token})
 
 @app.get("/getgrouplink/{token}")
 async def get_group_link(token: str):
