@@ -4,9 +4,11 @@ import sqlite3
 import uuid
 import base64
 from fastapi import FastAPI, Request, Response
+from fastapi.templating import Jinja2Templates
+
+# --- Corrected Telegram Imports ---
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, ContextTypes
-from python_telegram_bot import Application as PTBApplication
 
 # Enable logging
 logging.basicConfig(
@@ -23,6 +25,7 @@ def get_db_connection():
     return conn
 
 def init_db():
+    # Create table if it doesn't exist
     with get_db_connection() as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS protected_links (
@@ -34,9 +37,10 @@ def init_db():
 
 # --- Telegram Bot Logic ---
 # This is a standard PTB application setup
-telegram_bot_app = PTBApplication.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
+telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /start command, both general and with a payload."""
     if context.args:
         encoded_id = context.args[0]
         with get_db_connection() as conn:
@@ -44,6 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if link_data:
             group_link = link_data["group_link"]
+            # Use RENDER_EXTERNAL_URL for the web app URL
             web_app_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/join?token={encoded_id}"
             
             keyboard = [[InlineKeyboardButton("Join Group", web_app=WebAppInfo(url=web_app_url))]]
@@ -58,6 +63,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generates a protected link for a given group link."""
     if not context.args or not context.args[0].startswith("https://t.me/"):
         await update.message.reply_text("Usage: `/protect https://t.me/yourgroupname`", parse_mode="Markdown")
         return
@@ -104,12 +110,10 @@ async def telegram_webhook(request: Request, token: str):
     return Response(status_code=200)
 
 @app.get("/join")
-async def join_page(token: str):
+async def join_page(request: Request, token: str):
     """Serves the HTML for the Web App."""
-    from fastapi.templating import Jinja2Templates
-    # You need to create a 'templates' folder and put join.html there
     templates = Jinja2Templates(directory="templates")
-    return templates.TemplateResponse("join.html", {"request": {}, "token": token})
+    return templates.TemplateResponse("join.html", {"request": request, "token": token})
 
 @app.get("/getgrouplink/{token}")
 async def get_group_link(token: str):
