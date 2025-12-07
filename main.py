@@ -10,10 +10,9 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.templating import Jinja2Templates
 
 # --- Telegram Imports ---
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, Message, ChatMember, ChatInviteLink
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, ChatMember
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
 
 # Enable logging
 logging.basicConfig(
@@ -38,20 +37,19 @@ def init_db():
     """Verifies the MongoDB connection."""
     try:
         client.admin.command('ismaster')
-        logger.info("✅ MongoDB connection successful.")
+        logger.info("✅ MongoDB connected")
         
         # Create indexes
         users_collection.create_index("user_id", unique=True)
         links_collection.create_index("created_by")
         links_collection.create_index("active")
-        links_collection.create_index("created_at")
-        logger.info("✅ Database indexes created.")
+        logger.info("✅ Database indexes created")
     except Exception as e:
-        logger.error(f"❌ MongoDB connection failed: {e}")
+        logger.error(f"❌ MongoDB error: {e}")
         raise
 
 async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if user is member of the support channel using channel ID."""
+    """Check if user is member of the support channel."""
     support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
     if not support_channel:
         return True
@@ -68,77 +66,52 @@ async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_T
         chat_member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return chat_member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except Exception as e:
-        logger.error(f"❌ Error checking channel membership: {e}")
+        logger.error(f"❌ Channel check error: {e}")
         return False
 
 async def require_channel_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Check and enforce channel membership."""
     user_id = update.effective_user.id
     
-    # Store user in database
+    # Store user
     users_collection.update_one(
         {"user_id": user_id},
         {"$set": {
             "username": update.effective_user.username,
             "first_name": update.effective_user.first_name,
-            "last_name": update.effective_user.last_name,
-            "last_active": update.message.date if update.message else datetime.datetime.now()
+            "last_active": datetime.datetime.now()
         }},
         upsert=True
     )
     
-    # Check if user is in channel
+    # Check membership
     if await check_channel_membership(user_id, context):
         return True
     
-    # User not in channel, show join button
+    # Not in channel
     support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
     if support_channel:
-        try:
-            try:
-                chat_id = int(support_channel)
-            except ValueError:
-                chat_id = support_channel
-            
-            # Try to create invite link
-            invite_link_obj = await context.bot.create_chat_invite_link(
-                chat_id=chat_id,
-                creates_join_request=True,
-                name="Bot Access",
-                expire_date=None
-            )
-            invite_link = invite_link_obj.invite_link
-        except:
-            # Fallback to t.me link
-            if support_channel.startswith('@'):
-                invite_link = f"https://t.me/{support_channel[1:]}"
-            elif support_channel.startswith('-100'):
-                invite_link = f"https://t.me/c/{support_channel[4:]}"
-            else:
-                invite_link = f"https://t.me/{support_channel}"
+        # Create simple invite link
+        if support_channel.startswith('-100'):
+            invite_link = f"https://t.me/c/{support_channel[4:]}"
+        elif support_channel.startswith('@'):
+            invite_link = f"https://t.me/{support_channel[1:]}"
+        else:
+            invite_link = f"https://t.me/{support_channel}"
         
         keyboard = [
-            [InlineKeyboardButton("🌟 JOIN OUR PREMIUM CHANNEL", url=invite_link)],
-            [InlineKeyboardButton("✅ VERIFY MEMBERSHIP", callback_data="check_join")]
+            [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
+            [InlineKeyboardButton("✅ Check", callback_data="check_join")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🔐 *PREMIUM ACCESS REQUIRED*\n\n"
-            "✨ Welcome to the elite circle of *LinkShield Pro* users!\n\n"
-            "🚀 To unlock our premium features and join our exclusive community, "
-            "you must first subscribe to our official channel.\n\n"
-            "📌 *Benefits of joining:*\n"
-            "• 🎯 Priority access to new features\n"
-            "• ⚡ Faster support response\n"
-            "• 💎 Exclusive premium content\n"
-            "• 🔔 Early announcement alerts\n\n"
-            "Click the button below to join, then verify your membership.",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
+            "🔐 Join our channel first to use this bot.\n"
+            "Then click 'Check' below.",
+            reply_markup=reply_markup
         )
     else:
-        return True  # No channel requirement
+        return True
     
     return False
 
@@ -150,114 +123,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "check_join":
         if await check_channel_membership(query.from_user.id, context):
             await query.message.edit_text(
-                "🎉 *WELCOME TO THE ELITE CLUB!*\n\n"
-                "✅ *Verification Successful!*\n\n"
-                "✨ You are now part of our premium community!\n"
-                "🚀 Unlocking all premium features for you...\n\n"
-                "⚡ *Features Activated:*\n"
-                "• 🔐 Military-grade link protection\n"
-                "• 📊 Advanced analytics dashboard\n"
-                "• ⚡ Priority processing\n"
-                "• 💎 Premium support access\n\n"
-                "Use /help to see all available commands!",
-                parse_mode=ParseMode.MARKDOWN
+                "✅ Verified!\n"
+                "You can now use the bot.\n\n"
+                "Use /help for commands."
             )
         else:
-            await query.answer(
-                "❌ *MEMBERSHIP VERIFICATION FAILED*\n\n"
-                "We couldn't verify your channel subscription.\n\n"
-                "⚠️ Please ensure:\n"
-                "1. You've joined the channel\n"
-                "2. Wait a few seconds\n"
-                "3. Try again\n\n"
-                "If issues persist, contact @admin",
-                show_alert=True
-            )
+            await query.answer("❌ Not joined yet. Please join first.", show_alert=True)
     
     elif query.data == "confirm_broadcast":
         await handle_broadcast_confirmation(update, context)
     
     elif query.data == "cancel_broadcast":
-        await query.message.edit_text(
-            "🔄 *BROADCAST CANCELLED*\n\n"
-            "No messages were sent to users.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await query.message.edit_text("❌ Broadcast cancelled")
     
     elif query.data.startswith("revoke_"):
         link_id = query.data.replace("revoke_", "")
         await handle_revoke_link(update, context, link_id)
-    
-    elif query.data.startswith("copy_"):
-        link_id = query.data.replace("copy_", "")
-        await handle_copy_link(update, context, link_id)
-    
-    elif query.data.startswith("share_"):
-        link_id = query.data.replace("share_", "")
-        await handle_share_link(update, context, link_id)
-
-async def handle_copy_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: str):
-    """Handle copy link button callback."""
-    query = update.callback_query
-    await query.answer("📋 Link copied to clipboard!")
-    
-    # Get the full link
-    bot_username = (await context.bot.get_me()).username
-    protected_link = f"https://t.me/{bot_username}?start={link_id}"
-    
-    await query.message.reply_text(
-        f"📋 *LINK COPIED*\n\n"
-        f"Here's your protected link:\n\n"
-        f"`{protected_link}`\n\n"
-        f"✅ Ready to share!",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def handle_share_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: str):
-    """Handle share link button callback."""
-    query = update.callback_query
-    await query.answer()
-    
-    # Get link data
-    link_data = links_collection.find_one({"_id": link_id})
-    if not link_data:
-        await query.answer("❌ Link not found!", show_alert=True)
-        return
-    
-    bot_username = (await context.bot.get_me()).username
-    protected_link = f"https://t.me/{bot_username}?start={link_id}"
-    short_id = link_data.get('short_id', link_id[:8])
-    
-    # Create share message with buttons
-    keyboard = [
-        [InlineKeyboardButton("🔗 COPY LINK", callback_data=f"copy_{link_id}")],
-        [
-            InlineKeyboardButton("📱 TELEGRAM", url=f"https://t.me/share/url?url={protected_link}&text=Join%20via%20secure%20link"),
-            InlineKeyboardButton("💬 WHATSAPP", url=f"https://wa.me/?text=Join%20via%20secure%20link:%20{protected_link}")
-        ],
-        [
-            InlineKeyboardButton("📧 EMAIL", url=f"mailto:?subject=Secure%20Invitation&body=Join%20via%20this%20secure%20link:%20{protected_link}"),
-            InlineKeyboardButton("📋 OTHER", callback_data=f"copy_{link_id}")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.message.reply_text(
-        f"📤 *SHARE PROTECTED LINK*\n\n"
-        f"🔗 *Link ID:* `{short_id}`\n"
-        f"📊 *Clicks:* {link_data.get('clicks', 0)}\n"
-        f"⏰ *Created:* {link_data.get('created_at', datetime.datetime.now()).strftime('%d %b %Y')}\n\n"
-        f"✨ *Share this secure link via:*",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
 
 # --- Telegram Bot Logic ---
 telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command with premium welcome effect."""
-    # Check channel membership first
+    """Handles the /start command."""
+    # Check channel membership
     if not await require_channel_membership(update, context):
         return
     
@@ -267,130 +155,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         link_data = links_collection.find_one({"_id": encoded_id, "active": True})
 
         if link_data:
-            group_link = link_data["group_link"]
             web_app_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/join?token={encoded_id}"
             
-            keyboard = [[InlineKeyboardButton("🔐 JOIN SECURE GROUP", web_app=WebAppInfo(url=web_app_url))]]
+            keyboard = [[InlineKeyboardButton("🔗 Join Group", web_app=WebAppInfo(url=web_app_url))]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            welcome_animation = """
-🔒 *SECURE ACCESS PORTAL* 🔒
-
-⚡ *Welcome to LinkShield Pro Security System*
-
-🎯 *Access Details:*
-• 🔑 Link ID: `{}`
-• 🛡️ Security: Military Grade
-• 📊 Status: ✅ ACTIVE
-• ⏰ Created: {}
-
-⚠️ *Security Protocol Activated*
-This link is protected by advanced encryption and verification systems.
-
-✅ *Click below to proceed with biometric verification...*
-""".format(
-    encoded_id[:12],
-    link_data.get('created_at', datetime.datetime.now()).strftime('%d %b %Y, %H:%M')
-)
-            
             await update.message.reply_text(
-                welcome_animation,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
+                "🛡️ Protected Link\n\n"
+                "Click below to join:",
+                reply_markup=reply_markup
             )
         else:
-            await update.message.reply_text(
-                "❌ *ACCESS DENIED*\n\n"
-                "🔐 This secure link has been:\n"
-                "• Revoked by creator\n"
-                "• Expired\n"
-                "• Invalidated\n\n"
-                "⚠️ Please contact the sender for a new secure invitation.",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text("❌ Link expired or revoked")
         return
     
-    # No args - show premium welcome message
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "")
-    
-    # Create interactive keyboard
-    keyboard = [
-        [InlineKeyboardButton("🚀 CREATE PROTECTED LINK", callback_data="create_link")],
-        [InlineKeyboardButton("📊 MY SECURE LINKS", callback_data="my_links")],
-        [InlineKeyboardButton("⚙️ SETTINGS", callback_data="settings")]
-    ]
-    
-    if support_channel:
-        try:
-            if support_channel.startswith('-100'):
-                invite_link = f"https://t.me/c/{support_channel[4:]}"
-            elif support_channel.startswith('@'):
-                invite_link = f"https://t.me/{support_channel[1:]}"
-            else:
-                invite_link = f"https://t.me/{support_channel}"
-        except:
-            invite_link = ""
-        
-        if invite_link:
-            keyboard.append([InlineKeyboardButton("🌟 PREMIUM CHANNEL", url=invite_link)])
-    
-    keyboard.append([InlineKeyboardButton("💎 GET PREMIUM", callback_data="get_premium")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # Premium welcome message with animation effect
-    premium_welcome = """
-✨ *✨ WELCOME TO LINKSHIELD PRO ✨*
-
-🎉 *Congratulations!* You've discovered the ultimate link protection solution.
-
-🔐 *ENTERPRISE-GRADE SECURITY*
-• Military-grade encryption
-• Advanced threat detection
-• Real-time monitoring
-• Zero-trust architecture
-
-🚀 *PREMIUM FEATURES*
-• 🔒 Unlimited protected links
-• 📊 Advanced analytics dashboard
-• ⚡ Lightning-fast processing
-• 🛡️ DDoS protection
-• 👥 Team collaboration
-• 📈 Performance insights
-
-⚡ *QUICK START*
-Use `/protect https://t.me/yourgroup` to create your first secure link.
-
-📋 *COMMANDS*
-• `/protect` - Create secure link
-• `/revoke` - Revoke access
-• `/stats` - View analytics
-• `/help` - Full guide
-
-👇 *Get started with the buttons below!*
-"""
-    
-    # Send with typing animation effect
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    await asyncio.sleep(1)
-    
+    # Simple welcome message
     await update.message.reply_text(
-        premium_welcome,
-        reply_markup=reply_markup,
+        "🔐 *LinkShield Pro*\n\n"
+        "Create protected Telegram group links.\n\n"
+        "📋 Commands:\n"
+        "• /protect <link> - Create link\n"
+        "• /revoke - Remove link\n"
+        "• /help - Show help\n\n"
+        "Example: `/protect https://t.me/group`",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generates a protected link for a given group link with share button."""
+    """Create protected link."""
     # Check channel membership
     if not await require_channel_membership(update, context):
         return
     
     if not context.args or not context.args[0].startswith("https://t.me/"):
         await update.message.reply_text(
-            "🎯 *CREATE PROTECTED LINK*\n\n"
-            "📝 *Usage:*\n`/protect https://t.me/yourgroup`\n\n"
-            "💡 *Pro Tip:* Ensure the bot is admin in your group for best security.",
+            "Usage: `/protect https://t.me/group`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -399,7 +198,6 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     unique_id = str(uuid.uuid4())
     encoded_id = base64.urlsafe_b64encode(unique_id.encode()).decode().rstrip("=")
     
-    # Generate short ID
     short_id = encoded_id[:8].upper()
 
     links_collection.insert_one({
@@ -407,76 +205,35 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "short_id": short_id,
         "group_link": group_link,
         "created_by": update.effective_user.id,
-        "created_by_name": update.effective_user.first_name,
         "created_at": datetime.datetime.now(),
         "active": True,
-        "clicks": 0,
-        "is_premium": update.effective_user.is_premium or False
+        "clicks": 0
     })
 
     bot_username = (await context.bot.get_me()).username
     protected_link = f"https://t.me/{bot_username}?start={encoded_id}"
     
-    # Create shareable message
-    share_message = f"""🔐 *SECURE INVITATION LINK*
-
-Join our private group through this secure link:
-{protected_link}
-
-📌 *This link is protected by LinkShield Pro*"""
-    
-    # Create premium keyboard with share options
+    # Simple buttons
     keyboard = [
         [
-            InlineKeyboardButton("📤 SHARE LINK", callback_data=f"share_{encoded_id}"),
-            InlineKeyboardButton("📋 COPY LINK", callback_data=f"copy_{encoded_id}")
-        ],
-        [
-            InlineKeyboardButton("⚡ QUICK SHARE", url=f"https://t.me/share/url?url={protected_link}&text=Join%20our%20secure%20group"),
-            InlineKeyboardButton("🔗 VIEW ANALYTICS", callback_data=f"stats_{encoded_id}")
-        ],
-        [InlineKeyboardButton("❌ REVOKE ACCESS", callback_data=f"revoke_{encoded_id}")]
+            InlineKeyboardButton("📤 Share", url=f"https://t.me/share/url?url={protected_link}"),
+            InlineKeyboardButton("❌ Revoke", callback_data=f"revoke_{encoded_id}")
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    success_message = f"""
-🎉 *PROTECTED LINK CREATED SUCCESSFULLY!*
-
-⚡ *Link Generated Instantly*
-
-🔑 *SECURITY DETAILS*
-• 🆔 Link ID: `{short_id}`
-• 🛡️ Security Level: ENTERPRISE
-• ✅ Status: ACTIVE
-• ⚡ Type: {'🌟 PREMIUM' if update.effective_user.is_premium else '✨ STANDARD'}
-• 📅 Created: {datetime.datetime.now().strftime('%d %b %Y, %H:%M:%S')}
-
-🔗 *YOUR SECURE LINK*
-`{protected_link}`
-
-📊 *MANAGEMENT OPTIONS*
-• Share with users securely
-• Track real-time analytics
-• Revoke access anytime
-• Monitor entry attempts
-
-⚠️ *IMPORTANT NOTES*
-• 🔒 Links never expire automatically
-• 👑 Only you can revoke this link
-• 📈 All access is logged & tracked
-• 🚀 Premium users get enhanced features
-
-👇 *Use the buttons below to share or manage!*
-"""
-    
     await update.message.reply_text(
-        success_message,
+        f"✅ Link created!\n\n"
+        f"ID: `{short_id}`\n\n"
+        f"Protected link:\n"
+        f"`{protected_link}`\n\n"
+        f"To revoke: `/revoke {short_id}`",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Revoke a protected link."""
+    """Revoke a link."""
     # Check channel membership
     if not await require_channel_membership(update, context):
         return
@@ -491,31 +248,23 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ))
         
         if not active_links:
-            await update.message.reply_text(
-                "📭 *NO ACTIVE LINKS*\n\n"
-                "You don't have any active protected links.\n"
-                "Create one with `/protect` command!",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            await update.message.reply_text("📭 No active links")
             return
         
-        message = "🔐 *YOUR ACTIVE SECURE LINKS*\n\n"
+        message = "🔐 Your links:\n\n"
         keyboard = []
         
         for link in active_links:
             short_id = link.get('short_id', link['_id'][:8])
             clicks = link.get('clicks', 0)
-            created = link.get('created_at', datetime.datetime.now()).strftime('%m/%d')
             
-            message += f"• `{short_id}` - 👥 {clicks} clicks - 📅 {created}\n"
+            message += f"• `{short_id}` - {clicks} clicks\n"
             keyboard.append([InlineKeyboardButton(
-                f"❌ REVOKE {short_id}",
+                f"❌ Revoke {short_id}",
                 callback_data=f"revoke_{link['_id']}"
             )])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        message += "\n⚠️ *WARNING:* Revocation is permanent and immediate!"
         
         await update.message.reply_text(
             message,
@@ -524,10 +273,10 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
     
-    # Try to revoke by short ID
+    # Revoke by ID
     link_id = context.args[0].upper()
     
-    # Search by short_id or _id
+    # Find link
     query = {
         "$or": [
             {"short_id": link_id},
@@ -540,137 +289,81 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     link_data = links_collection.find_one(query)
     
     if not link_data:
-        await update.message.reply_text(
-            "❌ *LINK NOT FOUND*\n\n"
-            "This link doesn't exist or you don't have permission to revoke it.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("❌ Link not found")
         return
     
-    # Update the link
-    result = links_collection.update_one(
+    # Revoke
+    links_collection.update_one(
         {"_id": link_data['_id']},
         {
             "$set": {
                 "active": False,
-                "revoked_at": datetime.datetime.now(),
-                "revoked_by": update.effective_user.id
+                "revoked_at": datetime.datetime.now()
             }
         }
     )
     
-    if result.modified_count > 0:
-        await update.message.reply_text(
-            f"✅ *LINK REVOKED SUCCESSFULLY!*\n\n"
-            f"🔒 Secure Link `{link_data.get('short_id', link_id)}` has been permanently revoked.\n\n"
-            f"📊 *Final Stats:*\n"
-            f"• Total Clicks: {link_data.get('clicks', 0)}\n"
-            f"• Created: {link_data.get('created_at', datetime.datetime.now()).strftime('%Y-%m-%d')}\n"
-            f"• Revoked: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"⚠️ All future access attempts will be blocked.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        await update.message.reply_text(
-            "❌ *FAILED TO REVOKE LINK*",
-            parse_mode=ParseMode.MARKDOWN
-        )
+    await update.message.reply_text(f"✅ Link `{link_id}` revoked")
 
 async def handle_revoke_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: str):
-    """Handle revoke button callback."""
+    """Handle revoke button."""
     query = update.callback_query
     await query.answer()
     
-    # Find and revoke the link
     link_data = links_collection.find_one({"_id": link_id, "active": True})
     
     if not link_data:
-        await query.message.edit_text(
-            "❌ Link not found or already revoked.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await query.message.edit_text("❌ Link already revoked")
         return
     
     if link_data['created_by'] != query.from_user.id:
-        await query.message.edit_text(
-            "❌ You don't have permission to revoke this link.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await query.message.edit_text("❌ Not your link")
         return
     
-    # Revoke the link
+    # Revoke
     links_collection.update_one(
         {"_id": link_id},
         {
             "$set": {
                 "active": False,
-                "revoked_at": datetime.datetime.now(),
-                "revoked_by": query.from_user.id
+                "revoked_at": datetime.datetime.now()
             }
         }
     )
     
-    await query.message.edit_text(
-        f"✅ *LINK REVOKED!*\n\n"
-        f"🔒 Secure Link `{link_data.get('short_id', link_id[:8])}` has been revoked.\n"
-        f"👥 Final Clicks: {link_data.get('clicks', 0)}\n\n"
-        f"⚠️ All access has been permanently blocked.",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await query.message.edit_text(f"✅ Link revoked")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Broadcast message to all bot users (Admin only)."""
+    """Admin broadcast."""
     admin_id = int(os.environ.get("ADMIN_ID", 0))
     if update.effective_user.id != admin_id:
-        await update.message.reply_text(
-            "🔒 *ADMIN ACCESS REQUIRED*\n\n"
-            "This command is restricted to system administrators only.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("❌ Admin only")
         return
     
     if not update.message.reply_to_message:
-        await update.message.reply_text(
-            "📢 *BROADCAST SYSTEM*\n\n"
-            "To send a broadcast:\n"
-            "1. Send any message\n"
-            "2. Reply to it with `/broadcast`\n"
-            "3. Confirm the action\n\n"
-            "✨ *Features:*\n"
-            "• Supports all media types\n"
-            "• Preserves formatting\n"
-            "• Tracks delivery\n"
-            "• No rate limiting",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("Reply to a message with /broadcast")
         return
     
     total_users = users_collection.count_documents({})
     keyboard = [
-        [InlineKeyboardButton("✅ CONFIRM BROADCAST", callback_data="confirm_broadcast")],
-        [InlineKeyboardButton("❌ CANCEL", callback_data="cancel_broadcast")]
+        [InlineKeyboardButton("✅ Send", callback_data="confirm_broadcast")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"⚠️ *BROADCAST CONFIRMATION*\n\n"
-        f"📊 *Delivery Stats:*\n"
-        f"• 📨 Recipients: {total_users} users\n"
-        f"• 📝 Type: {update.message.reply_to_message.content_type}\n"
-        f"• ⚡ Delivery: Instant\n\n"
-        f"Are you sure you want to proceed?",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+        f"Send to {total_users} users?",
+        reply_markup=reply_markup
     )
     
     context.user_data['broadcast_message'] = update.message.reply_to_message
 
 async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle broadcast confirmation."""
+    """Handle broadcast."""
     query = update.callback_query
     await query.answer()
     
-    await query.message.edit_text("📤 *BROADCASTING...*\n\nPlease wait, this may take a moment.")
+    await query.message.edit_text("📤 Sending...")
     
     users = list(users_collection.find({}))
     total_users = len(users)
@@ -685,10 +378,9 @@ async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DE
             successful += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            logger.error(f"Failed to broadcast to user {user['user_id']}: {e}")
+            logger.error(f"Failed: {user['user_id']}: {e}")
             failed += 1
     
-    # Save broadcast history
     broadcast_collection.insert_one({
         "admin_id": query.from_user.id,
         "date": datetime.datetime.now(),
@@ -697,29 +389,17 @@ async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DE
         "failed": failed
     })
     
-    success_rate = (successful / total_users * 100) if total_users > 0 else 0
-    
     await query.message.edit_text(
-        f"✅ *BROADCAST COMPLETE!*\n\n"
-        f"📊 *Delivery Report:*\n"
-        f"• 📨 Total Recipients: {total_users}\n"
-        f"• ✅ Successful: {successful}\n"
-        f"• ❌ Failed: {failed}\n"
-        f"• 📈 Success Rate: {success_rate:.1f}%\n"
-        f"• ⏰ Time: {datetime.datetime.now().strftime('%H:%M:%S')}\n\n"
-        f"✨ Broadcast logged in system.",
-        parse_mode=ParseMode.MARKDOWN
+        f"✅ Sent\n"
+        f"Success: {successful}\n"
+        f"Failed: {failed}"
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show bot statistics (Admin only)."""
+    """Show stats."""
     admin_id = int(os.environ.get("ADMIN_ID", 0))
     if update.effective_user.id != admin_id:
-        await update.message.reply_text(
-            "🔒 *ADMIN ACCESS REQUIRED*\n\n"
-            "This command is restricted to system administrators only.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("❌ Admin only")
         return
     
     total_users = users_collection.count_documents({})
@@ -728,75 +408,35 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     new_users_today = users_collection.count_documents({"last_active": {"$gte": today}})
-    new_links_today = links_collection.count_documents({"created_at": {"$gte": today}})
-    
-    # Calculate total clicks
-    total_clicks_result = links_collection.aggregate([
-        {"$group": {"_id": None, "total_clicks": {"$sum": "$clicks"}}}
-    ])
-    total_clicks = 0
-    for result in total_clicks_result:
-        total_clicks = result.get('total_clicks', 0)
     
     await update.message.reply_text(
-        f"📊 *SYSTEM ANALYTICS DASHBOARD*\n\n"
-        f"👥 *USER STATISTICS*\n"
-        f"• 📈 Total Users: {total_users}\n"
-        f"• 🆕 New Today: {new_users_today}\n\n"
-        f"🔗 *LINK STATISTICS*\n"
-        f"• 🔢 Total Links: {total_links}\n"
-        f"• 🟢 Active Links: {active_links}\n"
-        f"• 🆕 Created Today: {new_links_today}\n"
-        f"• 👆 Total Clicks: {total_clicks}\n\n"
-        f"⚙️ *SYSTEM STATUS*\n"
-        f"• 🗄️ Database: 🟢 Operational\n"
-        f"• 🤖 Bot: 🟢 Online\n"
-        f"• ⚡ Uptime: 100%\n"
-        f"• 🕐 Last Update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        parse_mode=ParseMode.MARKDOWN
+        f"📊 Stats\n\n"
+        f"Users: {total_users}\n"
+        f"New today: {new_users_today}\n\n"
+        f"Links: {total_links}\n"
+        f"Active: {active_links}"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show help message."""
+    """Show help."""
     if not await require_channel_membership(update, context):
         return
     
-    keyboard = [
-        [InlineKeyboardButton("🚀 CREATE LINK", callback_data="create_link")],
-        [InlineKeyboardButton("📊 VIEW STATS", callback_data="view_stats")],
-        [InlineKeyboardButton("💎 GET PREMIUM", callback_data="get_premium")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(
-        "🛡️ *LINKSHIELD PRO - HELP CENTER*\n\n"
-        "✨ *PREMIUM FEATURES OVERVIEW*\n"
-        "• 🔐 Military-grade encryption\n"
-        "• 📊 Advanced analytics\n"
-        "• ⚡ Priority processing\n"
-        "• 🛡️ DDoS protection\n\n"
-        "📋 *AVAILABLE COMMANDS*\n"
-        "• `/start` - Premium welcome\n"
-        "• `/protect <link>` - Create secure link\n"
-        "• `/revoke` - Revoke access\n"
-        "• `/help` - This message\n\n"
-        "🔒 *HOW TO USE*\n"
-        "1. Use `/protect https://t.me/yourgroup`\n"
+        "📋 *Commands*\n\n"
+        "/protect <link> - Create protected link\n"
+        "/revoke - Revoke a link\n"
+        "/help - This message\n\n"
+        "*How to:*\n"
+        "1. Use /protect with group link\n"
         "2. Share the generated link\n"
-        "3. Users join via verification\n"
-        "4. Manage with `/revoke`\n\n"
-        "💡 *PRO TIPS*\n"
-        "• Use descriptive group names\n"
-        "• Monitor link analytics\n"
-        "• Revoke unused links\n"
-        "• Join our premium channel\n\n"
-        "👇 *Quick actions:*",
-        reply_markup=reply_markup,
+        "3. Use /revoke to remove access\n\n"
+        "Example: `/protect https://t.me/group`",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def store_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Store user messages for statistics."""
+    """Store user activity."""
     if update.message and update.message.chat.type == "private":
         users_collection.update_one(
             {"user_id": update.effective_user.id},
@@ -813,23 +453,23 @@ telegram_bot_app.add_handler(CommandHandler("stats", stats_command))
 telegram_bot_app.add_handler(CommandHandler("help", help_command))
 telegram_bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, store_message))
 
-# Add callback query handler for buttons
+# Add callback handler
 from telegram.ext import CallbackQueryHandler
 telegram_bot_app.add_handler(CallbackQueryHandler(button_callback))
 
-# --- FastAPI Web Server Setup ---
+# --- FastAPI Setup ---
 app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
-    """Initializes the database, starts the PTB app, and sets the Telegram webhook."""
-    logger.info("✨ Starting LinkShield Pro...")
+    """Start bot."""
+    logger.info("Starting bot...")
     
     required_vars = ["TELEGRAM_TOKEN", "RENDER_EXTERNAL_URL"]
     for var in required_vars:
         if not os.environ.get(var):
-            logger.critical(f"❌ {var} is not set.")
-            raise Exception(f"{var} environment variable not set!")
+            logger.critical(f"Missing {var}")
+            raise Exception(f"Missing {var}")
     
     init_db()
     
@@ -838,24 +478,23 @@ async def on_startup():
     
     webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}/{os.environ.get('TELEGRAM_TOKEN')}"
     await telegram_bot_app.bot.set_webhook(url=webhook_url)
-    logger.info(f"✅ Webhook set to {webhook_url}")
+    logger.info(f"Webhook: {webhook_url}")
     
     bot_info = await telegram_bot_app.bot.get_me()
-    logger.info(f"🤖 Premium Bot: @{bot_info.username}")
-    logger.info("🚀 LinkShield Pro started successfully!")
+    logger.info(f"Bot: @{bot_info.username}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    """Stops the PTB application and closes the database connection."""
-    logger.info("🛑 Stopping LinkShield Pro...")
+    """Stop bot."""
+    logger.info("Stopping bot...")
     await telegram_bot_app.stop()
     await telegram_bot_app.shutdown()
     client.close()
-    logger.info("✅ LinkShield Pro stopped.")
+    logger.info("Bot stopped")
 
 @app.post("/{token}")
 async def telegram_webhook(request: Request, token: str):
-    """Receives updates from Telegram and passes them to the PTB application."""
+    """Telegram webhook."""
     if token != os.environ.get("TELEGRAM_TOKEN"):
         raise HTTPException(status_code=403, detail="Invalid token")
     
@@ -867,32 +506,29 @@ async def telegram_webhook(request: Request, token: str):
 
 @app.get("/join")
 async def join_page(request: Request, token: str):
-    """Serves the HTML for the Web App."""
+    """Web app page."""
     templates = Jinja2Templates(directory="templates")
     return templates.TemplateResponse("join.html", {"request": request, "token": token})
 
 @app.get("/getgrouplink/{token}")
 async def get_group_link(token: str):
-    """API endpoint for the Web App to fetch the real group link."""
+    """Get real group link."""
     link_data = links_collection.find_one({"_id": token, "active": True})
     
     if link_data:
-        # Increment click counter
         links_collection.update_one(
             {"_id": token},
             {"$inc": {"clicks": 1}}
         )
         return {"url": link_data["group_link"]}
     else:
-        raise HTTPException(status_code=404, detail="Link not found or revoked")
+        raise HTTPException(status_code=404, detail="Link not found")
 
 @app.get("/")
 async def root():
-    """Root endpoint for health check."""
+    """Health check."""
     return {
         "status": "ok",
-        "service": "LinkShield Pro",
-        "version": "Premium 2.1.0",
-        "time": datetime.datetime.now().isoformat(),
-        "features": ["military-grade-encryption", "advanced-analytics", "real-time-tracking"]
+        "service": "LinkShield",
+        "time": datetime.datetime.now().isoformat()
     }
