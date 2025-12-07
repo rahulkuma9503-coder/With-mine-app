@@ -21,12 +21,17 @@ MONGODB_URI = os.environ.get("MONGODB_URI")
 if not MONGODB_URI:
     raise Exception("MONGODB_URI environment variable not set!")
 
+# ...
 # Initialize MongoDB client and select database/collection
 client = MongoClient(MONGODB_URI)
-# The database name is usually part of the connection string, or you can specify it here
-db_name = MONGODB_URI.split('/')[-1].split('?')[0]
+
+# FIX: Use a hardcoded database name instead of parsing it from the URI.
+# The connection string is for connecting to the server, and the app
+# should define its own database name.
+db_name = "protected_bot_db" 
 db = client[db_name]
 links_collection = db["protected_links"]
+# ...
 
 def init_db():
     """In MongoDB, collections are created lazily on first insert.
