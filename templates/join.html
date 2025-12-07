@@ -50,6 +50,53 @@
             backdrop-filter: blur(10px);
             border: 1px solid rgba(0, 255, 65, 0.3);
             box-shadow: 0 0 25px rgba(0, 255, 65, 0.2);
+            
+            /* Added for the scanning light effect */
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* The Scanning Light Effect */
+        .scan-line, .scan-line-reverse {
+            position: absolute;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(
+                180deg,
+                rgba(0, 255, 65, 0) 0%,
+                rgba(0, 255, 65, 0.3) 48%,
+                rgba(0, 255, 65, 0.8) 50%,
+                rgba(0, 255, 65, 0.3) 52%,
+                rgba(0, 255, 65, 0) 100%
+            );
+            background-size: 100% 200%;
+            animation: scan 2.5s linear infinite;
+            pointer-events: none; /* Allows clicking through the effect */
+            z-index: 1;
+            border-radius: 15px; /* Matches the container's border */
+        }
+
+        .scan-line-reverse {
+            animation-name: scan-reverse;
+        }
+
+        @keyframes scan {
+            0% {
+                background-position: 0% -100%;
+            }
+            100% {
+                background-position: 0% 100%;
+            }
+        }
+
+        @keyframes scan-reverse {
+            0% {
+                background-position: 0% 100%;
+            }
+            100% {
+                background-position: 0% -100%;
+            }
         }
 
         h1 {
@@ -57,18 +104,21 @@
             font-size: 3em;
             font-weight: 700;
             color: var(--neon-green);
-            text-shadow: 
-                0 0 5px var(--neon-green),
-                0 0 10px var(--neon-green),
-                0 0 20px var(--neon-green-glow);
-            animation: pulse 2s infinite alternate;
+            /* Significantly reduced and simplified glow */
+            text-shadow: 0 0 5px var(--neon-green);
             margin-top: 0;
+            /* Ensure text is above the scan lines */
+            position: relative;
+            z-index: 2;
         }
 
         p {
             font-size: 1.5em;
             font-weight: 400;
             color: #cccccc;
+            /* Ensure text is above the scan lines */
+            position: relative;
+            z-index: 2;
         }
 
         .join-button {
@@ -84,20 +134,20 @@
             letter-spacing: 2px;
             text-transform: uppercase;
             transition: all 0.3s ease;
-            box-shadow: 
-                inset 0 0 10px var(--neon-green-glow),
-                0 0 15px var(--neon-green);
+            /* Significantly reduced glow */
+            box-shadow: 0 0 5px var(--neon-green);
             animation: pulse 2s infinite alternate;
             margin-top: 20px;
+            /* Ensure button is above the scan lines */
+            position: relative;
+            z-index: 2;
         }
 
         .join-button:hover {
             background-color: var(--neon-green);
             color: var(--bg-color);
-            box-shadow: 
-                inset 0 0 20px var(--neon-green),
-                0 0 30px var(--neon-green),
-                0 0 45px var(--neon-green-glow);
+            /* Significantly reduced glow on hover */
+            box-shadow: 0 0 10px var(--neon-green), 0 0 15px var(--neon-green-glow);
             transform: scale(1.05);
         }
         
@@ -113,8 +163,9 @@
 
         /* Keyframe Animations */
         @keyframes pulse {
-            0% { box-shadow: inset 0 0 10px var(--neon-green-glow), 0 0 15px var(--neon-green); }
-            100% { box-shadow: inset 0 0 15px var(--neon-green), 0 0 25px var(--neon-green), 0 0 40px var(--neon-green-glow); }
+            /* Very subtle pulse animation */
+            0% { box-shadow: 0 0 5px var(--neon-green); }
+            100% { box-shadow: 0 0 8px var(--neon-green), 0 0 12px var(--neon-green-glow); }
         }
 
     </style>
@@ -124,6 +175,10 @@
     <canvas id="matrix-bg"></canvas>
 
     <div class="container">
+        <!-- The Scanning Light Effects -->
+        <div class="scan-line"></div>
+        <div class="scan-line-reverse"></div>
+        
         <h1>TEAM SECRET</h1>
         <p>You are about to join an exclusive Telegram group.</p>
         <button id="joinBtn" class="join-button">Join Now</button>
@@ -185,7 +240,8 @@
         // --- Telegram Web App Logic ---
         document.addEventListener('DOMContentLoaded', () => {
             const joinBtn = document.getElementById('joinBtn');
-            const token = "{{ token }}"; // Token passed from Flask
+            // This token would be dynamically inserted by your backend (e.g., Flask, Django)
+            const token = "YOUR_SECURE_TOKEN_HERE"; // Replace with a real token for testing
 
             const tg = window.Telegram.WebApp;
             tg.ready();
@@ -197,24 +253,30 @@
                 joinBtn.disabled = true;
 
                 try {
-                    const response = await fetch(`/getgrouplink/${token}`);
+                    // Replace with your actual backend URL
+                    const response = await fetch(`https://your-backend.com/getgrouplink/${token}`);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
                     const data = await response.json();
 
                     if (data.url) {
-                        window.open(data.url, '_blank');
+                        // Use Telegram.WebApp.openLink to open within the Telegram app
+                        tg.openLink(data.url); 
                     } else {
                         alert('Error: Could not retrieve the group link.');
                     }
                 } catch (error) {
                     console.error('Fetch error:', error);
-                    alert('An error occurred. Please try again.');
+                    alert('An error occurred. Please try again later.');
                 } finally {
+                    // Give the user a moment to see the result before closing
                     setTimeout(() => {
                         tg.close();
-                    }, 500);
+                    }, 2000); 
                 }
             });
         });
     </script>
 </body>
-</html>
+    </html>
