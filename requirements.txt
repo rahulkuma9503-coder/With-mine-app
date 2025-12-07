@@ -1,4 +1,4 @@
-- python-telegram-bot
-+ python-telegram-bot[webhooks]
-  Flask
-  gunicorn
+python-telegram-bot[webhooks]
+fastapi
+uvicorn[standard]
+jinja2 # For rendering the HTML template
