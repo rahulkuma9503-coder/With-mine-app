@@ -82,21 +82,13 @@
         }
 
         @keyframes scan {
-            0% {
-                background-position: 0% -100%;
-            }
-            100% {
-                background-position: 0% 100%;
-            }
+            0% { background-position: 0% -100%; }
+            100% { background-position: 0% 100%; }
         }
 
         @keyframes scan-reverse {
-            0% {
-                background-position: 0% 100%;
-            }
-            100% {
-                background-position: 0% -100%;
-            }
+            0% { background-position: 0% 100%; }
+            100% { background-position: 0% -100%; }
         }
 
         h1 {
@@ -240,8 +232,14 @@
         // --- Telegram Web App Logic ---
         document.addEventListener('DOMContentLoaded', () => {
             const joinBtn = document.getElementById('joinBtn');
+
+            // !!! IMPORTANT: CONFIGURE THESE VALUES !!!
+            // Replace with the actual URL of your backend API endpoint.
+            const backendUrl = "https://your-backend.com/getgrouplink/"; 
+            
+            // Replace with the actual token provided by your backend or system.
             // This token would be dynamically inserted by your backend (e.g., Flask, Django)
-            const token = "YOUR_SECURE_TOKEN_HERE"; // Replace with a real token for testing
+            const token = "YOUR_SECURE_TOKEN_HERE"; 
 
             const tg = window.Telegram.WebApp;
             tg.ready();
@@ -249,27 +247,43 @@
             tg.enableClosingConfirmation();
 
             joinBtn.addEventListener('click', async () => {
+                // Check if the user has configured the script
+                if (backendUrl.includes("your-backend.com") || token === "YOUR_SECURE_TOKEN_HERE") {
+                    alert("Configuration Error: Please replace the placeholder backend URL and token in the script.");
+                    console.error("Script is not configured. Please update 'backendUrl' and 'token' variables.");
+                    return; // Stop execution
+                }
+
                 joinBtn.textContent = 'Loading...';
                 joinBtn.disabled = true;
 
                 try {
-                    // Replace with your actual backend URL
-                    const response = await fetch(`https://your-backend.com/getgrouplink/${token}`);
+                    const response = await fetch(`${backendUrl}${token}`);
+                    
+                    // Check if the HTTP response is successful (status 200-299)
                     if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
+                        // If not, throw an error with the status text
+                        throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
                     }
+
                     const data = await response.json();
 
                     if (data.url) {
                         // Use Telegram.WebApp.openLink to open within the Telegram app
                         tg.openLink(data.url); 
                     } else {
-                        alert('Error: Could not retrieve the group link.');
+                        alert('Error: Server response did not contain a group link.');
+                        console.error('Invalid data format received from server:', data);
                     }
                 } catch (error) {
+                    // Log the detailed error to the console for debugging
                     console.error('Fetch error:', error);
-                    alert('An error occurred. Please try again later.');
+                    // Show a user-friendly error message
+                    alert('An error occurred while fetching the group link. Please try again later.');
                 } finally {
+                    // Re-enable the button and reset text, whether the request succeeded or failed
+                    joinBtn.textContent = 'Join Now';
+                    joinBtn.disabled = false;
                     // Give the user a moment to see the result before closing
                     setTimeout(() => {
                         tg.close();
@@ -279,4 +293,4 @@
         });
     </script>
 </body>
-    </html>
+</html>
