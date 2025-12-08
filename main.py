@@ -165,30 +165,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         upsert=True
     )
     
-    # Check channel membership for ALL cases (with or without args)
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-    if support_channel and not await check_channel_membership(user_id, context):
-        # User not in channel - show join button
-        invite_link = await get_channel_invite_link(context, support_channel)
-        
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-            [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "🔐 *Channel Membership Required*\n\n"
-            "You must join our support channel to use this bot.\n"
-            "After joining, click 'I've Joined' below.",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    # User is in channel - proceed normally
+    # Check if this is a protected link (has argument)
     if context.args:
-        # Handle protected link
         encoded_id = context.args[0]
         link_data = links_collection.find_one({"_id": encoded_id, "active": True})
 
@@ -207,7 +185,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("❌ Link expired or revoked")
         return
     
-    # No args - show welcome message
+    # If no args, check channel membership first
+    if not await check_channel_membership(user_id, context):
+        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
+        if support_channel:
+            # Get channel invite link
+            invite_link = await get_channel_invite_link(context, support_channel)
+            
+            keyboard = [
+                [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
+                [InlineKeyboardButton("✅ Check", callback_data="check_join")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🔐 Join our channel first to use this bot.\n"
+                "Then click 'Check' below.",
+                reply_markup=reply_markup
+            )
+            return
+    
+    # User is in channel or no channel required - show beautiful welcome message
     user_name = update.effective_user.first_name or "User"
     
     # Create the beautiful welcome message
@@ -232,6 +230,7 @@ I help you keep your channel links safe & secure.
     # Create keyboard with support channel button
     keyboard = []
     
+    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
     if support_channel:
         invite_link = await get_channel_invite_link(context, support_channel)
         keyboard.append([InlineKeyboardButton("🌟 Support Channel", url=invite_link)])
@@ -250,19 +249,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "check_join":
         if await check_channel_membership(query.from_user.id, context):
             await query.message.edit_text(
-                "✅ *Verified Successfully!*\n\n"
-                "You can now use all bot features.\n\n"
-                "Use /help to see available commands.",
-                parse_mode=ParseMode.MARKDOWN
+                "✅ Verified!\n"
+                "You can now use the bot.\n\n"
+                "Use /help for commands."
             )
         else:
-            await query.answer(
-                "❌ *Please join the channel first!*\n\n"
-                "1. Click 'Join Channel' button\n"
-                "2. Join the channel\n"
-                "3. Come back and click 'I've Joined'",
-                show_alert=True
-            )
+            await query.answer("❌ Not joined yet. Please join first.", show_alert=True)
     
     elif query.data == "create_link":
         await query.message.reply_text(
@@ -285,24 +277,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Create protected link for ANY Telegram link (group or channel)."""
     # Check channel membership
-    user_id = update.effective_user.id
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-    
-    if support_channel and not await check_channel_membership(user_id, context):
-        invite_link = await get_channel_invite_link(context, support_channel)
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-            [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "🔐 *Channel Membership Required*\n\n"
-            "You must join our support channel to use this command.\n"
-            "After joining, click 'I've Joined' below.",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+    if not await check_channel_membership(update.effective_user.id, context):
+        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
+        if support_channel:
+            invite_link = await get_channel_invite_link(context, support_channel)
+            keyboard = [
+                [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
+                [InlineKeyboardButton("✅ Check", callback_data="check_join")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🔐 Join our channel first to use this bot.\n"
+                "Then click 'Check' below.",
+                reply_markup=reply_markup
+            )
         return
     
     if not context.args or not context.args[0].startswith("https://t.me/"):
@@ -373,24 +362,21 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Revoke a link."""
     # Check channel membership
-    user_id = update.effective_user.id
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-    
-    if support_channel and not await check_channel_membership(user_id, context):
-        invite_link = await get_channel_invite_link(context, support_channel)
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-            [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "🔐 *Channel Membership Required*\n\n"
-            "You must join our support channel to use this command.\n"
-            "After joining, click 'I've Joined' below.",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+    if not await check_channel_membership(update.effective_user.id, context):
+        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
+        if support_channel:
+            invite_link = await get_channel_invite_link(context, support_channel)
+            keyboard = [
+                [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
+                [InlineKeyboardButton("✅ Check", callback_data="check_join")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🔐 Join our channel first to use this bot.\n"
+                "Then click 'Check' below.",
+                reply_markup=reply_markup
+            )
         return
     
     if not context.args:
@@ -650,28 +636,28 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show help."""
     user_id = update.effective_user.id
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
     
     # Check channel membership
-    if support_channel and not await check_channel_membership(user_id, context):
-        invite_link = await get_channel_invite_link(context, support_channel)
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-            [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "🔐 *Channel Membership Required*\n\n"
-            "You must join our support channel to use this bot.\n"
-            "After joining, click 'I've Joined' below.",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+    if not await check_channel_membership(user_id, context):
+        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
+        if support_channel:
+            invite_link = await get_channel_invite_link(context, support_channel)
+            keyboard = [
+                [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
+                [InlineKeyboardButton("✅ Check", callback_data="check_join")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🔐 Join our channel first to use this bot.\n"
+                "Then click 'Check' below.",
+                reply_markup=reply_markup
+            )
         return
     
     keyboard = []
     
+    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
     if support_channel:
         invite_link = await get_channel_invite_link(context, support_channel)
         keyboard.append([InlineKeyboardButton("🌟 Support Channel", url=invite_link)])
@@ -785,44 +771,12 @@ async def telegram_webhook(request: Request, token: str):
 
 @app.get("/join")
 async def join_page(request: Request, token: str):
-    """Web app page with channel membership check."""
-    # Check if token exists
-    link_data = links_collection.find_one({"_id": token, "active": True})
-    if not link_data:
-        # Return error page
-        return templates.TemplateResponse("error.html", {
-            "request": request,
-            "message": "This link has expired or been revoked."
-        })
-    
+    """Web app page."""
     return templates.TemplateResponse("join.html", {"request": request, "token": token})
-
-@app.get("/check_membership/{user_id}")
-async def check_membership_api(user_id: str):
-    """API endpoint to check if user has joined the channel."""
-    try:
-        user_id_int = int(user_id)
-        
-        # We need a context to check membership - this is a simplified version
-        # In real implementation, you'd need to pass bot instance
-        
-        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-        if not support_channel:
-            return {"joined": True}
-        
-        # This is a placeholder - you'd need proper async context
-        # For now, we'll return true to allow access
-        # In production, implement proper Telegram API call
-        
-        return {"joined": True}
-        
-    except Exception as e:
-        logger.error(f"Error checking membership: {e}")
-        return {"joined": False, "error": str(e)}
 
 @app.get("/getgrouplink/{token}")
 async def get_group_link(token: str):
-    """Get real group/channel link with membership check."""
+    """Get real group/channel link."""
     link_data = links_collection.find_one({"_id": token, "active": True})
     
     if link_data:
@@ -841,6 +795,5 @@ async def root():
         "status": "ok",
         "service": "LinkShield Pro",
         "version": "2.0.0",
-        "time": datetime.datetime.now().isoformat(),
-        "channel_required": bool(os.environ.get("SUPPORT_CHANNEL"))
+        "time": datetime.datetime.now().isoformat()
     }
