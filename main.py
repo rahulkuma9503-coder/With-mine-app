@@ -151,7 +151,6 @@ async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_T
 telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /start command."""
     user_id = update.effective_user.id
     
@@ -262,7 +261,7 @@ I help you keep your channel links safe & secure.
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
     await update.message.reply_text(welcome_msg, reply_markup=reply_markup)
-    
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
     query = update.callback_query
@@ -539,6 +538,7 @@ async def handle_revoke_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
         f"⚠️ All access has been permanently blocked.",
         parse_mode=ParseMode.MARKDOWN
     )
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin broadcast."""
     admin_id = int(os.environ.get("ADMIN_ID", 0))
@@ -675,7 +675,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• 🗄️ Database: 🟢 Operational\n"
         f"• 🤖 Bot: 🟢 Online\n"
         f"• ⚡ Uptime: 100%\n"
-        f"• 🕐 Last Update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"• 🕐 Last Update: {datetime.datetime.now().strftime('%Y-%m-d %H:%M:%S')}",
         parse_mode=ParseMode.MARKDOWN
     )
 
