@@ -34,7 +34,7 @@ users_collection = db["users"]
 broadcast_collection = db["broadcast_history"]
 channels_collection = db["channels"]
 forced_links_collection = db["forced_links"]
-forced_group_collection = db["forced_group"]
+forced_groups_collection = db["forced_groups"]  # Changed to plural for multiple groups
 
 def init_db():
     try:
@@ -45,15 +45,15 @@ def init_db():
         links_collection.create_index("active")
         channels_collection.create_index("channel_id", unique=True)
         forced_links_collection.create_index("channel_id", unique=True)
-        forced_group_collection.create_index("group_id", unique=True)
+        forced_groups_collection.create_index("group_id", unique=True)  # Changed to plural
         logger.info("✅ Database indexes created")
     except Exception as e:
         logger.error(f"❌ MongoDB error: {e}")
         raise
 
-# ================= GET ALL REQUIRED CHANNELS (SUPPORT + FORCED GROUP) =================
+# ================= GET ALL REQUIRED CHANNELS (SUPPORT + FORCED GROUPS) =================
 def get_required_channels() -> List[str]:
-    """Get all channels user must join (support channels + forced group)."""
+    """Get all channels user must join (support channels + forced groups)."""
     channels = []
     
     # Add support channels from environment
@@ -61,23 +61,23 @@ def get_required_channels() -> List[str]:
     if support_raw:
         channels.extend([c.strip() for c in support_raw.split(",") if c.strip()])
     
-    # Add forced group from database
-    forced_group = forced_group_collection.find_one({})
-    if forced_group and forced_group.get("group_id"):
-        channels.append(forced_group["group_id"])
+    # Add forced groups from database
+    forced_groups = list(forced_groups_collection.find({}))
+    for group in forced_groups:
+        if group.get("group_id"):
+            channels.append(group["group_id"])
     
     return channels
 
-# ================= CHECK IF FORCED GROUP IS SET =================
-def is_forced_group_set() -> bool:
-    """Check if a forced group is configured."""
-    forced_group = forced_group_collection.find_one({})
-    return forced_group and forced_group.get("group_id")
+# ================= CHECK IF FORCED GROUPS ARE SET =================
+def has_forced_groups() -> bool:
+    """Check if any forced groups are configured."""
+    return forced_groups_collection.count_documents({}) > 0
 
-# ================= GET FORCED GROUP INFO =================
-def get_forced_group_info():
-    """Get information about the forced group."""
-    return forced_group_collection.find_one({})
+# ================= GET ALL FORCED GROUPS INFO =================
+def get_all_forced_groups():
+    """Get information about all forced groups."""
+    return list(forced_groups_collection.find({}))
 
 # ================= INVITE LINK =================
 async def get_channel_invite_link(context: ContextTypes.DEFAULT_TYPE, channel_id: str) -> str:
@@ -89,8 +89,8 @@ async def get_channel_invite_link(context: ContextTypes.DEFAULT_TYPE, channel_id
             logger.info(f"Using forced link for channel {channel_id}")
             return forced_link_data["forced_link"]
         
-        # Check if this is the forced group
-        forced_group = forced_group_collection.find_one({"group_id": channel_id})
+        # Check if this is a forced group
+        forced_group = forced_groups_collection.find_one({"group_id": channel_id})
         if forced_group and forced_group.get("group_link"):
             logger.info(f"Using forced group link for {channel_id}")
             return forced_group["group_link"]
@@ -151,9 +151,9 @@ async def get_channel_invite_link(context: ContextTypes.DEFAULT_TYPE, channel_id
         else:
             return f"https://t.me/{channel_id}"
 
-# ================= MEMBERSHIP CHECK (SUPPORT CHANNELS + FORCED GROUP) =================
+# ================= MEMBERSHIP CHECK (SUPPORT CHANNELS + FORCED GROUPS) =================
 async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if user has joined all required channels (support + forced group)."""
+    """Check if user has joined all required channels (support + forced groups)."""
     channels = get_required_channels()
     if not channels:
         return True
@@ -185,10 +185,10 @@ async def show_join_required_message(update: Update, context: ContextTypes.DEFAU
     
     message = "🔐 *Access Restricted*\n\n"
     
-    # Add forced group info if set
-    forced_group = get_forced_group_info()
-    if forced_group:
-        message += "⚠️ *MANDATORY:* You must join the required group to use this bot.\n\n"
+    # Check if forced groups exist
+    forced_groups = get_all_forced_groups()
+    if forced_groups:
+        message += f"⚠️ *MANDATORY:* You must join {len(forced_groups)} required group(s) to use this bot.\n\n"
     
     # Add support channels info if any
     support_raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
@@ -198,12 +198,16 @@ async def show_join_required_message(update: Update, context: ContextTypes.DEFAU
     message += "Please join ALL required channels/groups below:"
     
     # Create join buttons for all required channels
+    forced_groups = get_all_forced_groups()
+    forced_group_ids = [group["group_id"] for group in forced_groups if group.get("group_id")]
+    
     for idx, channel in enumerate(required_channels):
         invite_link = await get_channel_invite_link(context, channel)
         
         # Determine button text
-        if forced_group and channel == forced_group.get("group_id"):
-            button_text = "🔐 JOIN REQUIRED GROUP"
+        if channel in forced_group_ids:
+            group_index = forced_group_ids.index(channel) + 1
+            button_text = f"🔐 JOIN REQUIRED GROUP {group_index}"
         else:
             button_text = f"📢 Join Channel {idx+1}"
         
@@ -288,12 +292,12 @@ I help you keep your channel links safe & secure.
 
     keyboard = []
     
-    # Add forced group button if set
-    forced_group = get_forced_group_info()
-    if forced_group:
-        group_link = forced_group.get("group_link", "")
+    # Add forced group buttons if set
+    forced_groups = get_all_forced_groups()
+    for idx, group in enumerate(forced_groups):
+        group_link = group.get("group_link", "")
         if group_link:
-            keyboard.append([InlineKeyboardButton("🔐 Required Group", url=group_link)])
+            keyboard.append([InlineKeyboardButton(f"🔐 Required Group {idx+1}", url=group_link)])
     
     # Add support channel buttons
     support_raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
@@ -531,7 +535,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Add custom links stats
     forced_links_count = forced_links_collection.count_documents({})
-    forced_group = forced_group_collection.find_one({})
+    forced_groups_count = forced_groups_collection.count_documents({})
     
     await update.message.reply_text(
         f"📊 *System Analytics Dashboard*\n\n"
@@ -544,7 +548,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• 🆕 Created Today: `{new_links_today}`\n"
         f"• 👆 Total Clicks: `{total_clicks}`\n"
         f"• 🔧 Custom Links: `{forced_links_count}`\n"
-        f"• 🔐 Forced Group: `{'Enabled' if forced_group else 'Disabled'}`\n\n"
+        f"• 🔐 Forced Groups: `{forced_groups_count}`\n\n"
         f"⚙️ *System Status*\n"
         f"• 🗄️ Database: 🟢 Operational\n"
         f"• 🤖 Bot: 🟢 Online\n"
@@ -564,12 +568,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     keyboard = []
     
-    # Add forced group button if set
-    forced_group = get_forced_group_info()
-    if forced_group:
-        group_link = forced_group.get("group_link", "")
+    # Add forced group buttons if set
+    forced_groups = get_all_forced_groups()
+    for idx, group in enumerate(forced_groups):
+        group_link = group.get("group_link", "")
         if group_link:
-            keyboard.append([InlineKeyboardButton("🔐 Required Group", url=group_link)])
+            keyboard.append([InlineKeyboardButton(f"🔐 Required Group {idx+1}", url=group_link)])
     
     # Add support channel buttons
     support_raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
@@ -778,8 +782,9 @@ async def list_forced_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode=ParseMode.MARKDOWN
     )
 
+# ================= FORCED GROUPS MANAGEMENT =================
 async def forcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Set a forced group that users MUST join to use the bot."""
+    """Add a forced group that users MUST join to use the bot."""
     admin_id = int(os.environ.get("ADMIN_ID", 0))
     if update.effective_user.id != admin_id:
         await update.message.reply_text(
@@ -790,39 +795,45 @@ async def forcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     if not context.args:
-        # Show current forced group
-        forced_group = forced_group_collection.find_one({})
+        # Show current forced groups
+        forced_groups = list(forced_groups_collection.find({}))
         
-        if not forced_group:
+        if not forced_groups:
             await update.message.reply_text(
-                "📭 *No Forced Group Set*\n\n"
+                "📭 *No Forced Groups Set*\n\n"
                 "Usage: `/forcegroup <group_link_or_username>`\n\n"
                 "Examples:\n"
                 "• `/forcegroup https://t.me/+abc123def456`\n"
                 "• `/forcegroup @mygroup`\n"
                 "• `/forcegroup https://t.me/mygroup`\n\n"
-                "Users will be required to join this group before using the bot.",
+                "Users will be required to join all forced groups to use the bot.",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
         
-        group_id = forced_group.get("group_id", "Unknown")
-        group_link = forced_group.get("group_link", "No link")
-        set_by = forced_group.get("set_by", "Unknown")
-        set_at = forced_group.get("set_at", datetime.datetime.now()).strftime('%Y-%m-%d %H:%M')
+        message = "🔐 *Current Forced Groups:*\n\n"
+        keyboard = []
         
-        keyboard = [
-            [InlineKeyboardButton("❌ Remove Forced Group", callback_data="remove_forced_group")]
-        ]
+        for idx, group in enumerate(forced_groups):
+            group_id = group.get("group_id", "Unknown")
+            group_link = group.get("group_link", "No link")
+            set_by = group.get("set_by", "Unknown")
+            set_at = group.get("set_at", datetime.datetime.now()).strftime('%Y-%m-%d %H:%M')
+            
+            message += f"*Group {idx+1}:*\n"
+            message += f"  📢 ID: `{group_id}`\n"
+            message += f"  🔗 Link: `{group_link}`\n"
+            message += f"  👤 Set By: `{set_by}`\n"
+            message += f"  ⏰ Set At: `{set_at}`\n\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(f"❌ Remove Group {idx+1}", callback_data=f"remove_forced_group_{group['group_id']}")
+            ])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            f"🔐 *Current Forced Group:*\n\n"
-            f"📢 Group: `{group_id}`\n"
-            f"🔗 Link: `{group_link}`\n"
-            f"👤 Set By: `{set_by}`\n"
-            f"⏰ Set At: `{set_at}`\n\n"
-            f"⚠️ Users MUST join this group to use the bot.",
+            message,
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -860,29 +871,40 @@ async def forcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         group_id = f"@{group_identifier}"
         group_link = f"https://t.me/{group_identifier}"
     
+    # Check if group already exists
+    existing_group = forced_groups_collection.find_one({"group_id": group_id})
+    if existing_group:
+        await update.message.reply_text(
+            f"⚠️ *Group Already Exists!*\n\n"
+            f"This group is already in the forced list.\n\n"
+            f"Use `/forcegroup` to see all groups.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
     # Store the forced group
-    forced_group_collection.update_one(
-        {},
-        {"$set": {
-            "group_id": group_id,
-            "group_link": group_link,
-            "set_by": update.effective_user.id,
-            "set_at": datetime.datetime.now()
-        }},
-        upsert=True
-    )
+    forced_groups_collection.insert_one({
+        "group_id": group_id,
+        "group_link": group_link,
+        "set_by": update.effective_user.id,
+        "set_at": datetime.datetime.now(),
+        "group_identifier": group_identifier
+    })
+    
+    total_groups = forced_groups_collection.count_documents({})
     
     await update.message.reply_text(
-        f"✅ *Forced Group Set!*\n\n"
+        f"✅ *Forced Group Added!*\n\n"
         f"📢 Group: `{group_id}`\n"
         f"🔗 Link: `{group_link}`\n"
-        f"⏰ Set at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"⚠️ From now on, users MUST join this group to use the bot.",
+        f"⏰ Added at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"📊 Total Forced Groups: `{total_groups}`\n\n"
+        f"⚠️ Users must now join ALL {total_groups} group(s) to use the bot.",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def removeforcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove the forced group requirement."""
+    """Remove a forced group requirement."""
     admin_id = int(os.environ.get("ADMIN_ID", 0))
     if update.effective_user.id != admin_id:
         await update.message.reply_text(
@@ -891,16 +913,81 @@ async def removeforcegroup_command(update: Update, context: ContextTypes.DEFAULT
         )
         return
     
-    result = forced_group_collection.delete_one({})
+    if not context.args:
+        # Show all forced groups with remove options
+        forced_groups = list(forced_groups_collection.find({}))
+        
+        if not forced_groups:
+            await update.message.reply_text("📭 No forced groups set")
+            return
+        
+        message = "🔐 *Remove Forced Group:*\n\n"
+        message += "Use `/removeforcegroup <group_id>` to remove a group.\n\n"
+        message += "*Current Forced Groups:*\n"
+        
+        for idx, group in enumerate(forced_groups):
+            group_id = group.get("group_id", "Unknown")
+            group_link = group.get("group_link", "No link")
+            
+            message += f"{idx+1}. `{group_id}`\n"
+            message += f"   Link: `{group_link}`\n\n"
+        
+        await update.message.reply_text(
+            message,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Remove by group identifier
+    group_identifier = context.args[0]
+    
+    # Find and remove
+    result = forced_groups_collection.delete_one({
+        "$or": [
+            {"group_id": group_identifier},
+            {"group_identifier": group_identifier}
+        ]
+    })
     
     if result.deleted_count > 0:
+        remaining_groups = forced_groups_collection.count_documents({})
         await update.message.reply_text(
-            "✅ *Forced Group Removed!*\n\n"
-            "Users are no longer required to join a specific group to use the bot.",
+            f"✅ *Forced Group Removed!*\n\n"
+            f"Group: `{group_identifier}`\n\n"
+            f"Remaining forced groups: `{remaining_groups}`\n"
+            f"Users must join {remaining_groups} group(s) to use the bot.",
             parse_mode=ParseMode.MARKDOWN
         )
     else:
-        await update.message.reply_text("📭 No forced group was set")
+        await update.message.reply_text("❌ No forced group found with this identifier")
+
+async def clearforcegroups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear ALL forced groups."""
+    admin_id = int(os.environ.get("ADMIN_ID", 0))
+    if update.effective_user.id != admin_id:
+        await update.message.reply_text(
+            "🔒 *Admin Access Required*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Confirm with keyboard
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Clear All", callback_data="clear_all_forced_groups")],
+        [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_clear_groups")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    total_groups = forced_groups_collection.count_documents({})
+    
+    await update.message.reply_text(
+        f"⚠️ *Clear ALL Forced Groups?*\n\n"
+        f"This will remove all {total_groups} forced groups.\n"
+        f"Users will no longer be required to join any groups.\n\n"
+        f"Are you sure you want to proceed?",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def store_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Store user activity."""
@@ -1013,21 +1100,45 @@ async def handle_remove_forced(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await query.message.edit_text("❌ Link not found")
 
-async def handle_remove_forced_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_remove_forced_group(update: Update, context: ContextTypes.DEFAULT_TYPE, group_id: str):
     """Handle remove forced group button."""
     query = update.callback_query
     await query.answer()
     
-    result = forced_group_collection.delete_one({})
+    result = forced_groups_collection.delete_one({"group_id": group_id})
     
     if result.deleted_count > 0:
+        remaining_groups = forced_groups_collection.count_documents({})
         await query.message.edit_text(
-            "✅ *Forced Group Removed!*\n\n"
-            "Users are no longer required to join a specific group to use the bot.",
+            f"✅ *Forced Group Removed!*\n\n"
+            f"Group ID: `{group_id}`\n\n"
+            f"Remaining forced groups: `{remaining_groups}`\n"
+            f"Users must join {remaining_groups} group(s) to use the bot.",
             parse_mode=ParseMode.MARKDOWN
         )
     else:
-        await query.message.edit_text("📭 No forced group was set")
+        await query.message.edit_text("❌ Group not found")
+
+async def handle_clear_all_forced_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle clear all forced groups button."""
+    query = update.callback_query
+    await query.answer()
+    
+    result = forced_groups_collection.delete_many({})
+    
+    await query.message.edit_text(
+        f"✅ *All Forced Groups Cleared!*\n\n"
+        f"Removed {result.deleted_count} group(s).\n"
+        f"Users are no longer required to join any groups to use the bot.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_cancel_clear_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle cancel clear groups button."""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.edit_text("❌ Clear operation cancelled.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button callbacks."""
@@ -1099,8 +1210,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         channel_id = query.data.replace("remove_forced_", "")
         await handle_remove_forced(update, context, channel_id)
     
-    elif query.data == "remove_forced_group":
-        await handle_remove_forced_group(update, context)
+    elif query.data.startswith("remove_forced_group_"):
+        group_id = query.data.replace("remove_forced_group_", "")
+        await handle_remove_forced_group(update, context, group_id)
+    
+    elif query.data == "clear_all_forced_groups":
+        await handle_clear_all_forced_groups(update, context)
+    
+    elif query.data == "cancel_clear_groups":
+        await handle_cancel_clear_groups(update, context)
 
 # Register all handlers
 telegram_bot_app.add_handler(CommandHandler("start", start))
@@ -1114,6 +1232,7 @@ telegram_bot_app.add_handler(CommandHandler("remove", remove_command))
 telegram_bot_app.add_handler(CommandHandler("customlinks", list_forced_command))
 telegram_bot_app.add_handler(CommandHandler("forcegroup", forcegroup_command))
 telegram_bot_app.add_handler(CommandHandler("removeforcegroup", removeforcegroup_command))
+telegram_bot_app.add_handler(CommandHandler("clearforcegroups", clearforcegroups_command))
 telegram_bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, store_message))
 
 # Add callback handler
@@ -1147,13 +1266,15 @@ async def on_startup():
     bot_info = await telegram_bot_app.bot.get_me()
     logger.info(f"Bot: @{bot_info.username}")
     
-    # Log forced group and custom links on startup
-    forced_group = forced_group_collection.find_one({})
-    if forced_group:
-        logger.info(f"✅ Forced Group is SET: {forced_group.get('group_id')}")
-        logger.info(f"   Link: {forced_group.get('group_link')}")
+    # Log forced groups and custom links on startup
+    forced_groups = get_all_forced_groups()
+    if forced_groups:
+        logger.info(f"✅ {len(forced_groups)} Forced Group(s) are SET:")
+        for idx, group in enumerate(forced_groups):
+            logger.info(f"   {idx+1}. {group.get('group_id')}")
+            logger.info(f"      Link: {group.get('group_link')}")
     else:
-        logger.info("ℹ️ No forced group set")
+        logger.info("ℹ️ No forced groups set")
     
     forced_links = list(forced_links_collection.find({}))
     if forced_links:
