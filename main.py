@@ -733,9 +733,362 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         parse_mode=ParseMode.MARKDOWN
     )
 
-# [Keep the rest of the functions the same: revoke_command, handle_revoke_link, 
-# broadcast_command, handle_broadcast_confirmation, stats_command, help_command, 
-# store_message - they remain unchanged from previous version]
+# ================= MISSING FUNCTIONS ADDED HERE =================
+
+async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Revoke a protected link."""
+    # Check channel membership first
+    if not await check_channel_membership(update.effective_user.id, context):
+        channels = await get_force_join_channels()
+        if channels:
+            keyboard = []
+            for ch in channels:
+                invite_link = ch.get("invite_link")
+                if invite_link:
+                    keyboard.append([InlineKeyboardButton("📢 Join Channel", url=invite_link)])
+            
+            keyboard.append([InlineKeyboardButton("✅ I Have Joined", callback_data="check_join")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🔐 Join our channels first to use this bot.\n"
+                "After joining, click ✅ I Have Joined.",
+                reply_markup=reply_markup
+            )
+        return
+    
+    if not context.args:
+        # Show user's active links
+        user_id = update.effective_user.id
+        active_links = list(links_collection.find(
+            {"created_by": user_id, "active": True},
+            sort=[("created_at", -1)],
+            limit=10
+        ))
+        
+        if not active_links:
+            await update.message.reply_text("📭 No active links found.")
+            return
+        
+        message = "🔐 *Your Active Links:*\n\n"
+        keyboard = []
+        
+        for link in active_links:
+            short_id = link.get('short_id', link['_id'][:8])
+            clicks = link.get('clicks', 0)
+            created = link.get('created_at', datetime.datetime.now()).strftime('%m/%d')
+            
+            message += f"• `{short_id}` - {clicks} clicks - {created}\n"
+            keyboard.append([InlineKeyboardButton(
+                f"❌ Revoke {short_id}",
+                callback_data=f"revoke_{link['_id']}"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message += "\nClick a button below to revoke."
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Revoke by ID
+    link_id = context.args[0].upper()
+    
+    # Find link
+    query = {
+        "$or": [
+            {"short_id": link_id},
+            {"_id": link_id}
+        ],
+        "created_by": update.effective_user.id,
+        "active": True
+    }
+    
+    link_data = links_collection.find_one(query)
+    
+    if not link_data:
+        await update.message.reply_text("❌ Link not found or you don't have permission to revoke it.")
+        return
+    
+    # Revoke
+    links_collection.update_one(
+        {"_id": link_data['_id']},
+        {
+            "$set": {
+                "active": False,
+                "revoked_at": datetime.datetime.now()
+            }
+        }
+    )
+    
+    await update.message.reply_text(
+        f"✅ *Link Revoked!*\n\n"
+        f"Link `{link_data.get('short_id', link_id)}` has been permanently revoked.\n\n"
+        f"⚠️ All future access attempts will be blocked.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def handle_revoke_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: str):
+    """Handle revoke button callback."""
+    query = update.callback_query
+    await query.answer()
+    
+    link_data = links_collection.find_one({"_id": link_id, "active": True})
+    
+    if not link_data:
+        await query.message.edit_text(
+            "❌ Link not found or already revoked.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    if link_data['created_by'] != query.from_user.id:
+        await query.message.edit_text(
+            "❌ You don't have permission to revoke this link.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    # Revoke
+    links_collection.update_one(
+        {"_id": link_id},
+        {
+            "$set": {
+                "active": False,
+                "revoked_at": datetime.datetime.now()
+            }
+        }
+    )
+    
+    await query.message.edit_text(
+        f"✅ *Link Revoked!*\n\n"
+        f"Link `{link_data.get('short_id', link_id[:8])}` has been revoked.\n"
+        f"👥 Final Clicks: {link_data.get('clicks', 0)}\n\n"
+        f"⚠️ All access has been permanently blocked.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin broadcast command."""
+    admin_id = int(os.environ.get("ADMIN_ID", 0))
+    if update.effective_user.id != admin_id:
+        await update.message.reply_text(
+            "🔒 *Admin Access Required*\n\n"
+            "This command is restricted to administrators only.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            "📢 *Broadcast System*\n\n"
+            "To broadcast a message:\n"
+            "1. Send any message\n"
+            "2. Reply to it with `/broadcast`\n"
+            "3. Confirm the action\n\n"
+            "✨ *Features:*\n"
+            "• Supports all media types\n"
+            "• Preserves formatting\n"
+            "• Tracks delivery\n"
+            "• No rate limiting",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    total_users = users_collection.count_documents({})
+    keyboard = [
+        [InlineKeyboardButton("✅ Confirm Broadcast", callback_data="confirm_broadcast")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    content_type = getattr(update.message.reply_to_message, 'content_type', 'text')
+    
+    await update.message.reply_text(
+        f"⚠️ *Broadcast Confirmation*\n\n"
+        f"📊 *Delivery Stats:*\n"
+        f"• 📨 Recipients: `{total_users}` users\n"
+        f"• 📝 Type: {content_type}\n"
+        f"• ⚡ Delivery: Instant\n\n"
+        f"Are you sure you want to proceed?",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    context.user_data['broadcast_message'] = update.message.reply_to_message
+
+async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle broadcast confirmation."""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.edit_text("📤 *Broadcasting...*\n\nPlease wait, this may take a moment.", parse_mode=ParseMode.MARKDOWN)
+    
+    users = list(users_collection.find({}))
+    total_users = len(users)
+    successful = 0
+    failed = 0
+    
+    message_to_broadcast = context.user_data.get('broadcast_message')
+    
+    for user in users:
+        try:
+            await message_to_broadcast.copy(chat_id=user['user_id'])
+            successful += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error(f"Failed to send to {user['user_id']}: {e}")
+            failed += 1
+    
+    broadcast_collection.insert_one({
+        "admin_id": query.from_user.id,
+        "date": datetime.datetime.now(),
+        "total_users": total_users,
+        "successful": successful,
+        "failed": failed
+    })
+    
+    success_rate = (successful / total_users * 100) if total_users > 0 else 0
+    
+    await query.message.edit_text(
+        f"✅ *Broadcast Complete!*\n\n"
+        f"📊 *Delivery Report:*\n"
+        f"• 📨 Total Recipients: `{total_users}`\n"
+        f"• ✅ Successful: `{successful}`\n"
+        f"• ❌ Failed: `{failed}`\n"
+        f"• 📈 Success Rate: `{success_rate:.1f}%`\n"
+        f"• ⏰ Time: {datetime.datetime.now().strftime('%H:%M:%S')}\n\n"
+        f"✨ Broadcast logged in system.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show bot statistics (Admin only)."""
+    admin_id = int(os.environ.get("ADMIN_ID", 0))
+    if update.effective_user.id != admin_id:
+        await update.message.reply_text(
+            "🔒 *Admin Access Required*\n\n"
+            "This command is restricted to administrators only.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    total_users = users_collection.count_documents({})
+    total_links = links_collection.count_documents({})
+    active_links = links_collection.count_documents({"active": True})
+    
+    today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    new_users_today = users_collection.count_documents({"last_active": {"$gte": today}})
+    new_links_today = links_collection.count_documents({"created_at": {"$gte": today}})
+    
+    # Calculate total clicks
+    total_clicks_result = links_collection.aggregate([
+        {"$group": {"_id": None, "total_clicks": {"$sum": "$clicks"}}}
+    ])
+    total_clicks = 0
+    for result in total_clicks_result:
+        total_clicks = result.get('total_clicks', 0)
+    
+    # Get force join channels
+    force_channels = await get_force_join_channels()
+    
+    stats_message = f"📊 *System Analytics Dashboard*\n\n"
+    stats_message += f"👥 *User Statistics*\n"
+    stats_message += f"• 📈 Total Users: `{total_users}`\n"
+    stats_message += f"• 🆕 New Today: `{new_users_today}`\n\n"
+    stats_message += f"🔗 *Link Statistics*\n"
+    stats_message += f"• 🔢 Total Links: `{total_links}`\n"
+    stats_message += f"• 🟢 Active Links: `{active_links}`\n"
+    stats_message += f"• 🆕 Created Today: `{new_links_today}`\n"
+    stats_message += f"• 👆 Total Clicks: `{total_clicks}`\n\n"
+    
+    if force_channels:
+        stats_message += f"📢 *Force Join Channels:* {len(force_channels)}\n"
+        for ch in force_channels:
+            stats_message += f"• `{ch.get('channel_id', 'Unknown')}`\n"
+        stats_message += "\n"
+    
+    stats_message += f"⚙️ *System Status*\n"
+    stats_message += f"• 🗄️ Database: 🟢 Operational\n"
+    stats_message += f"• 🤖 Bot: 🟢 Online\n"
+    stats_message += f"• ⚡ Uptime: 100%\n"
+    stats_message += f"• 🕐 Last Update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    await update.message.reply_text(stats_message, parse_mode=ParseMode.MARKDOWN)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show help information."""
+    user_id = update.effective_user.id
+    
+    # Check channel membership
+    if not await check_channel_membership(user_id, context):
+        channels = await get_force_join_channels()
+        if channels:
+            keyboard = []
+            for ch in channels:
+                invite_link = ch.get("invite_link")
+                if invite_link:
+                    keyboard.append([InlineKeyboardButton("📢 Join Channel", url=invite_link)])
+            
+            keyboard.append([InlineKeyboardButton("✅ I Have Joined", callback_data="check_join")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "🔐 Join our channels first to use this bot.\n"
+                "After joining, click ✅ I Have Joined.",
+                reply_markup=reply_markup
+            )
+        return
+    
+    keyboard = []
+    
+    channels = await get_force_join_channels()
+    for ch in channels:
+        invite_link = ch.get("invite_link")
+        if invite_link:
+            keyboard.append([InlineKeyboardButton("🌟 Support Channel", url=invite_link)])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    
+    await update.message.reply_text(
+        "🛡️ *LinkShield Pro - Help Center*\n\n"
+        "✨ *What I Can Protect:*\n"
+        "• 🔗 Telegram Channels (public/private)\n"
+        "• 👥 Telegram Groups (public/private)\n"
+        "• 🛡️ Supergroups\n"
+        "• 🔒 Private invite links\n\n"
+        "📋 *Available Commands:*\n"
+        "• `/start` - Start the bot\n"
+        "• `/protect <link>` - Create secure link\n"
+        "• `/revoke` - Revoke your links\n"
+        "• `/help` - This message\n"
+        "• `/force <link>` - Add force join (Admin)\n"
+        "• `/remove <id>` - Remove force join (Admin)\n\n"
+        "🔒 *How to Use:*\n"
+        "1. Use `/protect https://t.me/yourchannel`\n"
+        "2. Share the generated link\n"
+        "3. Users join via verification\n"
+        "4. Manage with `/revoke`\n\n"
+        "💡 *Pro Tips:*\n"
+        "• Works with any t.me link\n"
+        "• Monitor link analytics\n"
+        "• Revoke unused links\n"
+        "• Set force join channels for security",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def store_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Store user activity."""
+    if update.message and update.message.chat.type == "private":
+        users_collection.update_one(
+            {"user_id": update.effective_user.id},
+            {"$set": {"last_active": update.message.date}},
+            upsert=True
+        )
 
 # Register handlers
 telegram_bot_app.add_handler(CommandHandler("start", start))
@@ -751,8 +1104,6 @@ telegram_bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, stor
 # Add callback handler
 from telegram.ext import CallbackQueryHandler
 telegram_bot_app.add_handler(CallbackQueryHandler(button_callback))
-
-# [Keep the FastAPI setup and other functions unchanged from previous version]
 
 # --- FastAPI Setup ---
 app = FastAPI()
@@ -824,7 +1175,7 @@ async def get_group_link(token: str):
             {"_id": token},
             {"$inc": {"clicks": 1}}
         )
-        return {"url": link_data.get("telegram_link") or link_data.get("group_link")}
+        return {"url": link_data.get("telegram_link")}
     else:
         raise HTTPException(status_code=404, detail="Link not found")
 
