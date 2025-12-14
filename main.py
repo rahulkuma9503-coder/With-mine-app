@@ -4,7 +4,7 @@ import uuid
 import base64
 import asyncio
 import datetime
-from typing import Optional
+from typing import Optional, List
 from pymongo import MongoClient
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.templating import Jinja2Templates
@@ -33,7 +33,8 @@ links_collection = db["protected_links"]
 users_collection = db["users"]
 broadcast_collection = db["broadcast_history"]
 channels_collection = db["channels"]
-forced_links_collection = db["forced_links"]  # New collection for custom links
+forced_links_collection = db["forced_links"]
+forced_group_collection = db["forced_group"]  # New collection for forced group
 
 def init_db():
     try:
@@ -43,22 +44,29 @@ def init_db():
         links_collection.create_index("created_by")
         links_collection.create_index("active")
         channels_collection.create_index("channel_id", unique=True)
-        forced_links_collection.create_index("channel_id", unique=True)  # New index
+        forced_links_collection.create_index("channel_id", unique=True)
+        forced_group_collection.create_index("group_id", unique=True)  # New index
         logger.info("✅ Database indexes created")
     except Exception as e:
         logger.error(f"❌ MongoDB error: {e}")
         raise
 
-# ================= MULTI SUPPORT (NO UI CHANGE) =================
-def get_support_channels():
-    raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
-    if not raw:
-        return []
-    return [c.strip() for c in raw.split(",") if c.strip()]
-
-def get_primary_support_channel():
-    channels = get_support_channels()
-    return channels[0] if channels else ""
+# ================= GET ALL REQUIRED CHANNELS (SUPPORT + FORCED GROUP) =================
+def get_required_channels() -> List[str]:
+    """Get all channels user must join (support channels + forced group)."""
+    channels = []
+    
+    # Add support channels from environment
+    support_raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
+    if support_raw:
+        channels.extend([c.strip() for c in support_raw.split(",") if c.strip()])
+    
+    # Add forced group from database
+    forced_group = forced_group_collection.find_one({})
+    if forced_group and forced_group.get("group_id"):
+        channels.append(forced_group["group_id"])
+    
+    return channels
 
 # ================= INVITE LINK =================
 async def get_channel_invite_link(context: ContextTypes.DEFAULT_TYPE, channel_id: str) -> str:
@@ -69,6 +77,12 @@ async def get_channel_invite_link(context: ContextTypes.DEFAULT_TYPE, channel_id
         if forced_link_data and forced_link_data.get("forced_link"):
             logger.info(f"Using forced link for channel {channel_id}")
             return forced_link_data["forced_link"]
+        
+        # Check if this is the forced group
+        forced_group = forced_group_collection.find_one({"group_id": channel_id})
+        if forced_group and forced_group.get("group_link"):
+            logger.info(f"Using forced group link for {channel_id}")
+            return forced_group["group_link"]
         
         # Fall back to bot-generated link
         channel_data = channels_collection.find_one({"channel_id": channel_id})
@@ -126,105 +140,32 @@ async def get_channel_invite_link(context: ContextTypes.DEFAULT_TYPE, channel_id
         else:
             return f"https://t.me/{channel_id}"
 
-# ================= MEMBERSHIP CHECK (MULTI) =================
+# ================= MEMBERSHIP CHECK (SUPPORT CHANNELS + FORCED GROUP) =================
 async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    channels = get_support_channels()
+    """Check if user has joined all required channels (support + forced group)."""
+    channels = get_required_channels()
     if not channels:
         return True
 
-    for support_channel in channels:
+    for channel in channels:
         try:
             try:
-                chat_id = int(support_channel)
+                chat_id = int(channel)
             except ValueError:
-                chat_id = support_channel if support_channel.startswith("@") else f"@{support_channel}"
+                chat_id = channel if channel.startswith("@") else f"@{channel}"
 
             chat_member = await context.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
             if chat_member.status not in (ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER):
                 return False
         except Exception as e:
-            logger.error(f"❌ Channel check error ({support_channel}): {e}")
+            logger.error(f"❌ Channel check error ({channel}): {e}")
             return False
 
     return True
 
-# --- Telegram Bot Logic ---
-telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
-
-# ================= NEW COMMANDS: FORCE AND REMOVE =================
-async def force_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Set a custom invite link for a support channel."""
-    admin_id = int(os.environ.get("ADMIN_ID", 0))
-    if update.effective_user.id != admin_id:
-        await update.message.reply_text(
-            "🔒 *Admin Access Required*\n\n"
-            "This command is restricted to administrators only.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: `/force <channel_identifier> <invite_link>`\n\n"
-            "Example:\n"
-            "`/force @mychannel https://t.me/+abc123def456`\n\n"
-            "Channel identifier can be:\n"
-            "• @username\n"
-            "• Channel ID (like -1001234567890)\n"
-            "• Channel link (https://t.me/username)",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    channel_identifier = context.args[0]
-    custom_link = context.args[1]
-    
-    # Validate the custom link
-    if not custom_link.startswith("https://t.me/"):
-        await update.message.reply_text(
-            "❌ Invalid invite link. Must be a Telegram invite link starting with https://t.me/"
-        )
-        return
-    
-    # Extract channel ID from identifier
-    channel_id = channel_identifier
-    if channel_identifier.startswith("https://t.me/"):
-        # Extract from URL
-        if channel_identifier.startswith("https://t.me/c/"):
-            # Convert t.me/c/ format to -100 ID
-            parts = channel_identifier.split('/')
-            if len(parts) >= 4:
-                channel_id = f"-100{parts[-1]}"
-        elif channel_identifier.startswith("https://t.me/+"):
-            # Public invite link
-            channel_id = channel_identifier.split('/')[-1]
-        else:
-            # Username link
-            channel_id = f"@{channel_identifier.split('/')[-1]}"
-    
-    # Store the forced link
-    forced_links_collection.update_one(
-        {"channel_id": channel_id},
-        {"$set": {
-            "forced_link": custom_link,
-            "set_by": update.effective_user.id,
-            "set_at": datetime.datetime.now(),
-            "channel_identifier": channel_identifier
-        }},
-        upsert=True
-    )
-    
-    await update.message.reply_text(
-        f"✅ *Custom Link Set!*\n\n"
-        f"📢 Channel: `{channel_identifier}`\n"
-        f"🔗 Custom Link: `{custom_link}`\n"
-        f"⏰ Set at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"The bot will now use this custom link instead of generating its own.",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove custom invite link for a support channel."""
+# ================= FORCE GROUP MANAGEMENT COMMANDS =================
+async def forcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set a forced group that users MUST join to use the bot."""
     admin_id = int(os.environ.get("ADMIN_ID", 0))
     if update.effective_user.id != admin_id:
         await update.message.reply_text(
@@ -235,78 +176,99 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     
     if not context.args:
-        # Show all forced links
-        forced_links = list(forced_links_collection.find({}))
+        # Show current forced group
+        forced_group = forced_group_collection.find_one({})
         
-        if not forced_links:
-            await update.message.reply_text("📭 No custom links set")
+        if not forced_group:
+            await update.message.reply_text(
+                "📭 *No Forced Group Set*\n\n"
+                "Usage: `/forcegroup <group_link_or_username>`\n\n"
+                "Examples:\n"
+                "• `/forcegroup https://t.me/+abc123def456`\n"
+                "• `/forcegroup @mygroup`\n"
+                "• `/forcegroup https://t.me/mygroup`\n\n"
+                "Users will be required to join this group before using the bot.",
+                parse_mode=ParseMode.MARKDOWN
+            )
             return
         
-        message = "🔧 *Custom Links:*\n\n"
-        keyboard = []
+        group_id = forced_group.get("group_id", "Unknown")
+        group_link = forced_group.get("group_link", "No link")
+        set_by = forced_group.get("set_by", "Unknown")
+        set_at = forced_group.get("set_at", datetime.datetime.now()).strftime('%Y-%m-%d %H:%M')
         
-        for link in forced_links:
-            channel_id = link.get("channel_identifier", link.get("channel_id", "Unknown"))
-            custom_link = link.get("forced_link", "N/A")
-            set_at = link.get("set_at", datetime.datetime.now()).strftime('%m/%d %H:%M')
-            
-            message += f"• `{channel_id}`\n  ↳ {custom_link[:30]}...\n  ↳ Set: {set_at}\n\n"
-            keyboard.append([InlineKeyboardButton(
-                f"❌ Remove {channel_id[:15]}...",
-                callback_data=f"remove_forced_{link['channel_id']}"
-            )])
-        
+        keyboard = [
+            [InlineKeyboardButton("❌ Remove Forced Group", callback_data="remove_forced_group")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        message += "Click a button below to remove."
-        
         await update.message.reply_text(
-            message,
+            f"🔐 *Current Forced Group:*\n\n"
+            f"📢 Group: `{group_id}`\n"
+            f"🔗 Link: `{group_link}`\n"
+            f"👤 Set By: `{set_by}`\n"
+            f"⏰ Set At: `{set_at}`\n\n"
+            f"Users MUST join this group to use the bot.",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
         return
     
-    # Remove by channel identifier
-    channel_identifier = context.args[0]
+    group_identifier = context.args[0]
     
-    # Find and remove
-    result = forced_links_collection.delete_one({
-        "$or": [
-            {"channel_id": channel_identifier},
-            {"channel_identifier": channel_identifier}
-        ]
-    })
-    
-    if result.deleted_count > 0:
-        await update.message.reply_text(
-            f"✅ *Custom Link Removed!*\n\n"
-            f"Channel: `{channel_identifier}`\n\n"
-            f"The bot will now generate its own invite links for this channel.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+    # Validate and parse group identifier
+    if group_identifier.startswith("https://t.me/+"):
+        # Public invite link
+        group_link = group_identifier
+        group_id = group_identifier.split('/')[-1]
+    elif group_identifier.startswith("https://t.me/"):
+        # Username link or channel link
+        group_link = group_identifier
+        if group_identifier.startswith("https://t.me/c/"):
+            # Convert to -100 format
+            parts = group_identifier.split('/')
+            if len(parts) >= 4:
+                group_id = f"-100{parts[-1]}"
+            else:
+                group_id = group_identifier
+        else:
+            group_id = f"@{group_identifier.split('/')[-1]}"
+    elif group_identifier.startswith("@"):
+        # Username
+        group_id = group_identifier
+        group_link = f"https://t.me/{group_identifier[1:]}"
+    elif group_identifier.startswith("-100"):
+        # Group ID
+        group_id = group_identifier
+        group_link = f"https://t.me/c/{group_identifier[4:]}"
     else:
-        await update.message.reply_text("❌ No custom link found for this channel")
-
-async def handle_remove_forced(update: Update, context: ContextTypes.DEFAULT_TYPE, channel_id: str):
-    """Handle remove forced link button."""
-    query = update.callback_query
-    await query.answer()
+        # Try as username
+        group_id = f"@{group_identifier}"
+        group_link = f"https://t.me/{group_identifier}"
     
-    result = forced_links_collection.delete_one({"channel_id": channel_id})
+    # Store the forced group
+    forced_group_collection.update_one(
+        {},
+        {"$set": {
+            "group_id": group_id,
+            "group_link": group_link,
+            "set_by": update.effective_user.id,
+            "set_at": datetime.datetime.now()
+        }},
+        upsert=True
+    )
     
-    if result.deleted_count > 0:
-        await query.message.edit_text(
-            f"✅ *Custom Link Removed!*\n\n"
-            f"Channel ID: `{channel_id}`\n\n"
-            f"The bot will now generate its own invite links for this channel.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        await query.message.edit_text("❌ Link not found")
+    await update.message.reply_text(
+        f"✅ *Forced Group Set!*\n\n"
+        f"📢 Group: `{group_id}`\n"
+        f"🔗 Link: `{group_link}`\n"
+        f"⏰ Set at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"From now on, users MUST join this group to use the bot.",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-async def list_forced_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """List all custom links."""
+async def removeforcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove the forced group requirement."""
     admin_id = int(os.environ.get("ADMIN_ID", 0))
     if update.effective_user.id != admin_id:
         await update.message.reply_text(
@@ -315,30 +277,35 @@ async def list_forced_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     
-    forced_links = list(forced_links_collection.find({}))
+    result = forced_group_collection.delete_one({})
     
-    if not forced_links:
-        await update.message.reply_text("📭 No custom links set")
-        return
+    if result.deleted_count > 0:
+        await update.message.reply_text(
+            "✅ *Forced Group Removed!*\n\n"
+            "Users are no longer required to join a specific group to use the bot.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text("📭 No forced group was set")
+
+async def handle_remove_forced_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle remove forced group button."""
+    query = update.callback_query
+    await query.answer()
     
-    message = "🔧 *Custom Links Configuration:*\n\n"
+    result = forced_group_collection.delete_one({})
     
-    for link in forced_links:
-        channel_id = link.get("channel_identifier", link.get("channel_id", "Unknown"))
-        custom_link = link.get("forced_link", "N/A")
-        set_by = link.get("set_by", "Unknown")
-        set_at = link.get("set_at", datetime.datetime.now()).strftime('%Y-%m-%d %H:%M')
-        
-        message += f"📢 *Channel:* `{channel_id}`\n"
-        message += f"🔗 *Custom Link:* `{custom_link}`\n"
-        message += f"👤 *Set By:* `{set_by}`\n"
-        message += f"⏰ *Set At:* `{set_at}`\n"
-        message += "━" * 30 + "\n\n"
-    
-    await update.message.reply_text(
-        message,
-        parse_mode=ParseMode.MARKDOWN
-    )
+    if result.deleted_count > 0:
+        await query.message.edit_text(
+            "✅ *Forced Group Removed!*\n\n"
+            "Users are no longer required to join a specific group to use the bot.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await query.message.edit_text("📭 No forced group was set")
+
+# --- Telegram Bot Logic ---
+telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -354,25 +321,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         upsert=True
     )
 
-    # 🔐 FORCE JOIN — FOR ALL USERS (NORMAL + PROTECTED)
+    # 🔐 FORCE JOIN — CHECK ALL REQUIRED CHANNELS (SUPPORT + FORCED GROUP)
     if not await check_channel_membership(user_id, context):
         callback_data = f"check_join_{context.args[0]}" if context.args else "check_join"
 
         keyboard = []
-        for ch in get_support_channels():
-            invite_link = await get_channel_invite_link(context, ch)
+        required_channels = get_required_channels()
+        
+        if not required_channels:
+            # No requirements, proceed directly
+            await show_welcome_message(update, context)
+            return
+        
+        # Create join buttons for all required channels
+        for channel in required_channels:
+            invite_link = await get_channel_invite_link(context, channel)
+            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
             keyboard.append(
-                [InlineKeyboardButton("📢 Join Channel", url=invite_link)]
+                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
             )
 
         keyboard.append(
-            [InlineKeyboardButton("✅ Check", callback_data=callback_data)]
+            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
         )
 
         await update.message.reply_text(
             "🔐 *Access Restricted*\n\n"
-            "Please join all required channels/groups to use this bot.\n"
-            "After joining, click ✅ Check.",
+            "⚠️ You must join ALL required channels/groups to use this bot.\n\n"
+            "After joining ALL channels/groups above, click ✅ I've Joined.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
@@ -397,6 +373,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # 👋 NORMAL START — WELCOME UI (ONLY AFTER JOIN)
+    await show_welcome_message(update, context)
+
+async def show_welcome_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show welcome message after user has joined all required channels."""
     user_name = update.effective_user.first_name or "User"
 
     welcome_msg = f"""╔──────── ✧ ────────╗
@@ -418,10 +398,14 @@ I help you keep your channel links safe & secure.
 • 🎯 Easy to use UI"""
 
     keyboard = []
-    for ch in get_support_channels():
-        invite_link = await get_channel_invite_link(context, ch)
+    required_channels = get_required_channels()
+    
+    # Add support channel buttons if available
+    for channel in required_channels:
+        invite_link = await get_channel_invite_link(context, channel)
+        channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
         keyboard.append(
-            [InlineKeyboardButton("🌟 Support Channel", url=invite_link)]
+            [InlineKeyboardButton(f"🌟 {channel_name}", url=invite_link)]
         )
 
     keyboard.append(
@@ -438,12 +422,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "check_join":
         if await check_channel_membership(query.from_user.id, context):
             await query.message.edit_text(
-                "✅ Verified!\n"
+                "✅ *Verified!*\n\n"
+                "You've joined all required channels/groups.\n"
                 "You can now use the bot.\n\n"
-                "Use /help for commands."
+                "Use /help for commands.",
+                parse_mode=ParseMode.MARKDOWN
             )
         else:
-            await query.answer("❌ Not joined yet. Please join first.", show_alert=True)
+            await query.answer(
+                "❌ You haven't joined all channels/groups yet!\n"
+                "Please join ALL channels/groups and try again.",
+                show_alert=True
+            )
     
     elif query.data.startswith("check_join_"):
         encoded_id = query.data.replace("check_join_", "")
@@ -458,14 +448,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
                 await query.message.edit_text(
-                    "✅ Verified!\n\n"
+                    "✅ *Verified!*\n\n"
                     "You can now access the protected link.",
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN
                 )
             else:
                 await query.message.edit_text("❌ Link expired or revoked")
         else:
-            await query.answer("❌ Not joined yet. Please join first.", show_alert=True)
+            await query.answer(
+                "❌ You haven't joined all channels/groups yet!\n"
+                "Please join ALL channels/groups and try again.",
+                show_alert=True
+            )
     
     elif query.data == "create_link":
         await query.message.reply_text(
@@ -485,29 +480,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         link_id = query.data.replace("revoke_", "")
         await handle_revoke_link(update, context, link_id)
     
-    elif query.data.startswith("remove_forced_"):  # New handler
+    elif query.data.startswith("remove_forced_"):
         channel_id = query.data.replace("remove_forced_", "")
         await handle_remove_forced(update, context, channel_id)
+    
+    elif query.data == "remove_forced_group":  # New handler
+        await handle_remove_forced_group(update, context)
 
+# Add the force, remove, and forcegroup command handlers (keep the existing ones)
 async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Create protected link for ANY Telegram link (group or channel)."""
+    # Check if user has joined all required channels
     if not await check_channel_membership(update.effective_user.id, context):
-        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-        if support_channel:
-            invite_link = await get_channel_invite_link(context, support_channel)
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-                [InlineKeyboardButton("✅ Check", callback_data="check_join")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "🔐 Join our channel first to use this bot.\n"
-                "Then click 'Check' below.",
-                reply_markup=reply_markup
+        callback_data = "check_join"
+        
+        keyboard = []
+        required_channels = get_required_channels()
+        
+        # Create join buttons for all required channels
+        for channel in required_channels:
+            invite_link = await get_channel_invite_link(context, channel)
+            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
+            keyboard.append(
+                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
             )
+
+        keyboard.append(
+            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
+        )
+        
+        await update.message.reply_text(
+            "🔐 *Access Restricted*\n\n"
+            "⚠️ You must join ALL required channels/groups to use this command.\n\n"
+            "After joining ALL channels/groups above, click ✅ I've Joined.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
     
+    # Rest of the protect_command function remains the same...
     if not context.args or not context.args[0].startswith("https://t.me/"):
         await update.message.reply_text(
             "Usage: `/protect https://t.me/yourchannel`\n\n"
@@ -570,25 +581,37 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         parse_mode=ParseMode.MARKDOWN
     )
 
+# Make sure to update revoke_command, help_command, etc. to use check_channel_membership
 async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Revoke a link."""
+    # Check if user has joined all required channels
     if not await check_channel_membership(update.effective_user.id, context):
-        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-        if support_channel:
-            invite_link = await get_channel_invite_link(context, support_channel)
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-                [InlineKeyboardButton("✅ Check", callback_data="check_join")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "🔐 Join our channel first to use this bot.\n"
-                "Then click 'Check' below.",
-                reply_markup=reply_markup
+        callback_data = "check_join"
+        
+        keyboard = []
+        required_channels = get_required_channels()
+        
+        for channel in required_channels:
+            invite_link = await get_channel_invite_link(context, channel)
+            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
+            keyboard.append(
+                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
             )
+
+        keyboard.append(
+            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
+        )
+        
+        await update.message.reply_text(
+            "🔐 *Access Restricted*\n\n"
+            "⚠️ You must join ALL required channels/groups to use this command.\n\n"
+            "After joining ALL channels/groups above, click ✅ I've Joined.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
     
+    # Rest of revoke_command remains the same...
     if not context.args:
         user_id = update.effective_user.id
         active_links = list(links_collection.find(
@@ -660,214 +683,45 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def handle_revoke_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: str):
-    """Handle revoke button."""
-    query = update.callback_query
-    await query.answer()
-    
-    link_data = links_collection.find_one({"_id": link_id, "active": True})
-    
-    if not link_data:
-        await query.message.edit_text(
-            "❌ Link not found or already revoked.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    if link_data['created_by'] != query.from_user.id:
-        await query.message.edit_text(
-            "❌ You don't have permission to revoke this link.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    links_collection.update_one(
-        {"_id": link_id},
-        {
-            "$set": {
-                "active": False,
-                "revoked_at": datetime.datetime.now()
-            }
-        }
-    )
-    
-    await query.message.edit_text(
-        f"✅ *Link Revoked!*\n\n"
-        f"Link `{link_data.get('short_id', link_id[:8])}` has been revoked.\n"
-        f"👥 Final Clicks: {link_data.get('clicks', 0)}\n\n"
-        f"⚠️ All access has been permanently blocked.",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin broadcast."""
-    admin_id = int(os.environ.get("ADMIN_ID", 0))
-    if update.effective_user.id != admin_id:
-        await update.message.reply_text(
-            "🔒 *Admin Access Required*\n\n"
-            "This command is restricted to administrators only.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    if not update.message.reply_to_message:
-        await update.message.reply_text(
-            "📢 *Broadcast System*\n\n"
-            "To broadcast a message:\n"
-            "1. Send any message\n"
-            "2. Reply to it with `/broadcast`\n"
-            "3. Confirm the action\n\n"
-            "✨ *Features:*\n"
-            "• Supports all media types\n"
-            "• Preserves formatting\n"
-            "• Tracks delivery\n"
-            "• No rate limiting",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    total_users = users_collection.count_documents({})
-    keyboard = [
-        [InlineKeyboardButton("✅ Confirm Broadcast", callback_data="confirm_broadcast")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    content_type = getattr(update.message.reply_to_message, 'content_type', 'text')
-    
-    await update.message.reply_text(
-        f"⚠️ *Broadcast Confirmation*\n\n"
-        f"📊 *Delivery Stats:*\n"
-        f"• 📨 Recipients: `{total_users}` users\n"
-        f"• 📝 Type: {content_type}\n"
-        f"• ⚡ Delivery: Instant\n\n"
-        f"Are you sure you want to proceed?",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    context.user_data['broadcast_message'] = update.message.reply_to_message
-
-async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle broadcast confirmation."""
-    query = update.callback_query
-    await query.answer()
-    
-    await query.message.edit_text("📤 *Broadcasting...*\n\nPlease wait, this may take a moment.", parse_mode=ParseMode.MARKDOWN)
-    
-    users = list(users_collection.find({}))
-    total_users = len(users)
-    successful = 0
-    failed = 0
-    
-    message_to_broadcast = context.user_data.get('broadcast_message')
-    
-    for user in users:
-        try:
-            await message_to_broadcast.copy(chat_id=user['user_id'])
-            successful += 1
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            logger.error(f"Failed: {user['user_id']}: {e}")
-            failed += 1
-    
-    broadcast_collection.insert_one({
-        "admin_id": query.from_user.id,
-        "date": datetime.datetime.now(),
-        "total_users": total_users,
-        "successful": successful,
-        "failed": failed
-    })
-    
-    success_rate = (successful / total_users * 100) if total_users > 0 else 0
-    
-    await query.message.edit_text(
-        f"✅ *Broadcast Complete!*\n\n"
-        f"📊 *Delivery Report:*\n"
-        f"• 📨 Total Recipients: `{total_users}`\n"
-        f"• ✅ Successful: `{successful}`\n"
-        f"• ❌ Failed: `{failed}`\n"
-        f"• 📈 Success Rate: `{success_rate:.1f}%`\n"
-        f"• ⏰ Time: {datetime.datetime.now().strftime('%H:%M:%S')}\n\n"
-        f"✨ Broadcast logged in system.",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show stats."""
-    admin_id = int(os.environ.get("ADMIN_ID", 0))
-    if update.effective_user.id != admin_id:
-        await update.message.reply_text(
-            "🔒 *Admin Access Required*\n\n"
-            "This command is restricted to administrators only.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    total_users = users_collection.count_documents({})
-    total_links = links_collection.count_documents({})
-    active_links = links_collection.count_documents({"active": True})
-    
-    today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    new_users_today = users_collection.count_documents({"last_active": {"$gte": today}})
-    new_links_today = links_collection.count_documents({"created_at": {"$gte": today}})
-    
-    total_clicks_result = links_collection.aggregate([
-        {"$group": {"_id": None, "total_clicks": {"$sum": "$clicks"}}}
-    ])
-    total_clicks = 0
-    for result in total_clicks_result:
-        total_clicks = result.get('total_clicks', 0)
-    
-    # Add custom links stats
-    forced_links_count = forced_links_collection.count_documents({})
-    
-    await update.message.reply_text(
-        f"📊 *System Analytics Dashboard*\n\n"
-        f"👥 *User Statistics*\n"
-        f"• 📈 Total Users: `{total_users}`\n"
-        f"• 🆕 New Today: `{new_users_today}`\n\n"
-        f"🔗 *Link Statistics*\n"
-        f"• 🔢 Total Links: `{total_links}`\n"
-        f"• 🟢 Active Links: `{active_links}`\n"
-        f"• 🆕 Created Today: `{new_links_today}`\n"
-        f"• 👆 Total Clicks: `{total_clicks}`\n"
-        f"• 🔧 Custom Links: `{forced_links_count}`\n\n"
-        f"⚙️ *System Status*\n"
-        f"• 🗄️ Database: 🟢 Operational\n"
-        f"• 🤖 Bot: 🟢 Online\n"
-        f"• ⚡ Uptime: 100%\n"
-        f"• 🕐 Last Update: {datetime.datetime.now().strftime('%Y-%m-d %H:%M:%S')}",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show help."""
     user_id = update.effective_user.id
     
+    # Check if user has joined all required channels
     if not await check_channel_membership(user_id, context):
-        support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-        if support_channel:
-            invite_link = await get_channel_invite_link(context, support_channel)
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Channel", url=invite_link)],
-                [InlineKeyboardButton("✅ Check", callback_data="check_join")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "🔐 Join our channel first to use this bot.\n"
-                "Then click 'Check' below.",
-                reply_markup=reply_markup
+        callback_data = "check_join"
+        
+        keyboard = []
+        required_channels = get_required_channels()
+        
+        for channel in required_channels:
+            invite_link = await get_channel_invite_link(context, channel)
+            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
+            keyboard.append(
+                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
             )
+
+        keyboard.append(
+            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
+        )
+        
+        await update.message.reply_text(
+            "🔐 *Access Restricted*\n\n"
+            "⚠️ You must join ALL required channels/groups to use the bot.\n\n"
+            "After joining ALL channels/groups above, click ✅ I've Joined.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
     
     keyboard = []
+    required_channels = get_required_channels()
     
-    support_channel = os.environ.get("SUPPORT_CHANNEL", "").strip()
-    if support_channel:
-        invite_link = await get_channel_invite_link(context, support_channel)
-        keyboard.append([InlineKeyboardButton("🌟 Support Channel", url=invite_link)])
+    # Add support channel buttons
+    for channel in required_channels:
+        invite_link = await get_channel_invite_link(context, channel)
+        channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
+        keyboard.append([InlineKeyboardButton(f"🌟 {channel_name}", url=invite_link)])
     
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
@@ -892,30 +746,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Works with any t.me link\n"
         "• Monitor link analytics\n"
         "• Revoke unused links\n"
-        "• Join our support channel",
+        "• Join our support channels",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def store_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Store user activity."""
-    if update.message and update.message.chat.type == "private":
-        users_collection.update_one(
-            {"user_id": update.effective_user.id},
-            {"$set": {"last_active": update.message.date}},
-            upsert=True
-        )
-
-# Register handlers
+# Register all handlers
 telegram_bot_app.add_handler(CommandHandler("start", start))
 telegram_bot_app.add_handler(CommandHandler("protect", protect_command))
 telegram_bot_app.add_handler(CommandHandler("revoke", revoke_command))
 telegram_bot_app.add_handler(CommandHandler("broadcast", broadcast_command))
 telegram_bot_app.add_handler(CommandHandler("stats", stats_command))
 telegram_bot_app.add_handler(CommandHandler("help", help_command))
-telegram_bot_app.add_handler(CommandHandler("force", force_command))  # New
-telegram_bot_app.add_handler(CommandHandler("remove", remove_command))  # New
-telegram_bot_app.add_handler(CommandHandler("customlinks", list_forced_command))  # New
+telegram_bot_app.add_handler(CommandHandler("force", force_command))
+telegram_bot_app.add_handler(CommandHandler("remove", remove_command))
+telegram_bot_app.add_handler(CommandHandler("customlinks", list_forced_command))
+telegram_bot_app.add_handler(CommandHandler("forcegroup", forcegroup_command))  # New
+telegram_bot_app.add_handler(CommandHandler("removeforcegroup", removeforcegroup_command))  # New
 telegram_bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, store_message))
 
 # Add callback handler
@@ -949,7 +796,11 @@ async def on_startup():
     bot_info = await telegram_bot_app.bot.get_me()
     logger.info(f"Bot: @{bot_info.username}")
     
-    # Log custom links on startup
+    # Log forced group and custom links on startup
+    forced_group = forced_group_collection.find_one({})
+    if forced_group:
+        logger.info(f"Forced Group: {forced_group.get('group_id')}")
+    
     forced_links = list(forced_links_collection.find({}))
     if forced_links:
         logger.info(f"Loaded {len(forced_links)} custom link(s)")
