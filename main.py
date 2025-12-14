@@ -68,6 +68,17 @@ def get_required_channels() -> List[str]:
     
     return channels
 
+# ================= CHECK IF FORCED GROUP IS SET =================
+def is_forced_group_set() -> bool:
+    """Check if a forced group is configured."""
+    forced_group = forced_group_collection.find_one({})
+    return forced_group and forced_group.get("group_id")
+
+# ================= GET FORCED GROUP INFO =================
+def get_forced_group_info():
+    """Get information about the forced group."""
+    return forced_group_collection.find_one({})
+
 # ================= INVITE LINK =================
 async def get_channel_invite_link(context: ContextTypes.DEFAULT_TYPE, channel_id: str) -> str:
     """Get invite link, preferring forced custom link over bot-generated one."""
@@ -163,6 +174,50 @@ async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_T
 
     return True
 
+# ================= DISPLAY JOIN REQUIRED MESSAGE =================
+async def show_join_required_message(update: Update, context: ContextTypes.DEFAULT_TYPE, callback_data: str = "check_join"):
+    """Show message requiring user to join channels/groups."""
+    keyboard = []
+    required_channels = get_required_channels()
+    
+    if not required_channels:
+        return True  # No requirements
+    
+    message = "🔐 *Access Restricted*\n\n"
+    
+    # Add forced group info if set
+    forced_group = get_forced_group_info()
+    if forced_group:
+        message += "⚠️ *MANDATORY:* You must join the required group to use this bot.\n\n"
+    
+    # Add support channels info if any
+    support_raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
+    if support_raw:
+        message += "📢 *OPTIONAL:* Consider joining our support channels for updates.\n\n"
+    
+    message += "Please join ALL required channels/groups below:"
+    
+    # Create join buttons for all required channels
+    for idx, channel in enumerate(required_channels):
+        invite_link = await get_channel_invite_link(context, channel)
+        
+        # Determine button text
+        if forced_group and channel == forced_group.get("group_id"):
+            button_text = "🔐 JOIN REQUIRED GROUP"
+        else:
+            button_text = f"📢 Join Channel {idx+1}"
+        
+        keyboard.append([InlineKeyboardButton(button_text, url=invite_link)])
+
+    keyboard.append([InlineKeyboardButton("✅ I've Joined All", callback_data=callback_data)])
+
+    await update.message.reply_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return False
+
 # --- Telegram Bot Logic ---
 telegram_bot_app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
 
@@ -182,37 +237,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         upsert=True
     )
 
-    # 🔐 FORCE JOIN — CHECK ALL REQUIRED CHANNELS (SUPPORT + FORCED GROUP)
+    # Check if user has joined all required channels
     if not await check_channel_membership(user_id, context):
         callback_data = f"check_join_{context.args[0]}" if context.args else "check_join"
-
-        keyboard = []
-        required_channels = get_required_channels()
-        
-        if not required_channels:
-            # No requirements, proceed directly
-            await show_welcome_message(update, context)
-            return
-        
-        # Create join buttons for all required channels
-        for channel in required_channels:
-            invite_link = await get_channel_invite_link(context, channel)
-            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
-            keyboard.append(
-                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
-            )
-
-        keyboard.append(
-            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
-        )
-
-        await update.message.reply_text(
-            "🔐 *Access Restricted*\n\n"
-            "⚠️ You must join ALL required channels/groups to use this bot.\n\n"
-            "After joining ALL channels/groups above, click ✅ I've Joined.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await show_join_required_message(update, context, callback_data)
         return
 
     # 🔗 PROTECTED LINK FLOW (AFTER JOIN)
@@ -259,19 +287,23 @@ I help you keep your channel links safe & secure.
 • 🎯 Easy to use UI"""
 
     keyboard = []
-    required_channels = get_required_channels()
     
-    # Add support channel buttons if available
-    for channel in required_channels:
-        invite_link = await get_channel_invite_link(context, channel)
-        channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
-        keyboard.append(
-            [InlineKeyboardButton(f"🌟 {channel_name}", url=invite_link)]
-        )
+    # Add forced group button if set
+    forced_group = get_forced_group_info()
+    if forced_group:
+        group_link = forced_group.get("group_link", "")
+        if group_link:
+            keyboard.append([InlineKeyboardButton("🔐 Required Group", url=group_link)])
+    
+    # Add support channel buttons
+    support_raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
+    if support_raw:
+        support_channels = [c.strip() for c in support_raw.split(",") if c.strip()]
+        for channel in support_channels:
+            invite_link = await get_channel_invite_link(context, channel)
+            keyboard.append([InlineKeyboardButton("🌟 Support Channel", url=invite_link)])
 
-    keyboard.append(
-        [InlineKeyboardButton("🚀 Create Protected Link", callback_data="create_link")]
-    )
+    keyboard.append([InlineKeyboardButton("🚀 Create Protected Link", callback_data="create_link")])
 
     await update.message.reply_text(welcome_msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -279,30 +311,7 @@ async def protect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Create protected link for ANY Telegram link (group or channel)."""
     # Check if user has joined all required channels
     if not await check_channel_membership(update.effective_user.id, context):
-        callback_data = "check_join"
-        
-        keyboard = []
-        required_channels = get_required_channels()
-        
-        # Create join buttons for all required channels
-        for channel in required_channels:
-            invite_link = await get_channel_invite_link(context, channel)
-            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
-            keyboard.append(
-                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
-            )
-
-        keyboard.append(
-            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
-        )
-        
-        await update.message.reply_text(
-            "🔐 *Access Restricted*\n\n"
-            "⚠️ You must join ALL required channels/groups to use this command.\n\n"
-            "After joining ALL channels/groups above, click ✅ I've Joined.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await show_join_required_message(update, context, "check_join")
         return
     
     if not context.args or not context.args[0].startswith("https://t.me/"):
@@ -371,29 +380,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Revoke a link."""
     # Check if user has joined all required channels
     if not await check_channel_membership(update.effective_user.id, context):
-        callback_data = "check_join"
-        
-        keyboard = []
-        required_channels = get_required_channels()
-        
-        for channel in required_channels:
-            invite_link = await get_channel_invite_link(context, channel)
-            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
-            keyboard.append(
-                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
-            )
-
-        keyboard.append(
-            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
-        )
-        
-        await update.message.reply_text(
-            "🔐 *Access Restricted*\n\n"
-            "⚠️ You must join ALL required channels/groups to use this command.\n\n"
-            "After joining ALL channels/groups above, click ✅ I've Joined.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await show_join_required_message(update, context, "check_join")
         return
     
     if not context.args:
@@ -544,7 +531,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Add custom links stats
     forced_links_count = forced_links_collection.count_documents({})
-    forced_group_count = forced_group_collection.count_documents({})
+    forced_group = forced_group_collection.find_one({})
     
     await update.message.reply_text(
         f"📊 *System Analytics Dashboard*\n\n"
@@ -557,12 +544,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"• 🆕 Created Today: `{new_links_today}`\n"
         f"• 👆 Total Clicks: `{total_clicks}`\n"
         f"• 🔧 Custom Links: `{forced_links_count}`\n"
-        f"• 🔐 Forced Group: `{'Yes' if forced_group_count > 0 else 'No'}`\n\n"
+        f"• 🔐 Forced Group: `{'Enabled' if forced_group else 'Disabled'}`\n\n"
         f"⚙️ *System Status*\n"
         f"• 🗄️ Database: 🟢 Operational\n"
         f"• 🤖 Bot: 🟢 Online\n"
         f"• ⚡ Uptime: 100%\n"
-        f"• 🕐 Last Update: {datetime.datetime.now().strftime('%Y-%m-d %H:%M:%S')}",
+        f"• 🕐 Last Update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -572,39 +559,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # Check if user has joined all required channels
     if not await check_channel_membership(user_id, context):
-        callback_data = "check_join"
-        
-        keyboard = []
-        required_channels = get_required_channels()
-        
-        for channel in required_channels:
-            invite_link = await get_channel_invite_link(context, channel)
-            channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
-            keyboard.append(
-                [InlineKeyboardButton(f"📢 Join {channel_name}", url=invite_link)]
-            )
-
-        keyboard.append(
-            [InlineKeyboardButton("✅ I've Joined", callback_data=callback_data)]
-        )
-        
-        await update.message.reply_text(
-            "🔐 *Access Restricted*\n\n"
-            "⚠️ You must join ALL required channels/groups to use the bot.\n\n"
-            "After joining ALL channels/groups above, click ✅ I've Joined.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await show_join_required_message(update, context, "check_join")
         return
     
     keyboard = []
-    required_channels = get_required_channels()
+    
+    # Add forced group button if set
+    forced_group = get_forced_group_info()
+    if forced_group:
+        group_link = forced_group.get("group_link", "")
+        if group_link:
+            keyboard.append([InlineKeyboardButton("🔐 Required Group", url=group_link)])
     
     # Add support channel buttons
-    for channel in required_channels:
-        invite_link = await get_channel_invite_link(context, channel)
-        channel_name = "Forced Group" if channel.startswith("-100") or channel.startswith("@") else "Support Channel"
-        keyboard.append([InlineKeyboardButton(f"🌟 {channel_name}", url=invite_link)])
+    support_raw = os.environ.get("SUPPORT_CHANNELS", "").strip()
+    if support_raw:
+        support_channels = [c.strip() for c in support_raw.split(",") if c.strip()]
+        for channel in support_channels:
+            invite_link = await get_channel_invite_link(context, channel)
+            keyboard.append([InlineKeyboardButton("🌟 Support Channel", url=invite_link)])
     
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
@@ -629,7 +602,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Works with any t.me link\n"
         "• Monitor link analytics\n"
         "• Revoke unused links\n"
-        "• Join our support channels",
+        "• Join required channels to use the bot",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -849,7 +822,7 @@ async def forcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"🔗 Link: `{group_link}`\n"
             f"👤 Set By: `{set_by}`\n"
             f"⏰ Set At: `{set_at}`\n\n"
-            f"Users MUST join this group to use the bot.",
+            f"⚠️ Users MUST join this group to use the bot.",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -904,7 +877,7 @@ async def forcegroup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"📢 Group: `{group_id}`\n"
         f"🔗 Link: `{group_link}`\n"
         f"⏰ Set at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"From now on, users MUST join this group to use the bot.",
+        f"⚠️ From now on, users MUST join this group to use the bot.",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1073,7 +1046,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.answer(
                 "❌ You haven't joined all channels/groups yet!\n"
-                "Please join ALL channels/groups and try again.",
+                "Please join ALL required channels/groups and try again.",
                 show_alert=True
             )
     
@@ -1100,7 +1073,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.answer(
                 "❌ You haven't joined all channels/groups yet!\n"
-                "Please join ALL channels/groups and try again.",
+                "Please join ALL required channels/groups and try again.",
                 show_alert=True
             )
     
@@ -1177,7 +1150,10 @@ async def on_startup():
     # Log forced group and custom links on startup
     forced_group = forced_group_collection.find_one({})
     if forced_group:
-        logger.info(f"Forced Group: {forced_group.get('group_id')}")
+        logger.info(f"✅ Forced Group is SET: {forced_group.get('group_id')}")
+        logger.info(f"   Link: {forced_group.get('group_link')}")
+    else:
+        logger.info("ℹ️ No forced group set")
     
     forced_links = list(forced_links_collection.find({}))
     if forced_links:
